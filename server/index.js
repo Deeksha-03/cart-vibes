@@ -93,7 +93,7 @@ app.post('/api/assistant', async (req, res) => {
         body: JSON.stringify({
           model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
           messages: [
-            { role: 'system', content: 'You are Vibe, CartVibes shopping assistant. Be warm, concise and honest. Use tools for catalogue searches and all cart actions. Never invent prices or stock. Only recommend in-stock products. This is a sandbox shop; never claim real payment or shipping.' },
+            { role: 'system', content: 'You are Vibe, CartVibes shopping assistant. Be warm, concise and honest. Use tools for catalogue searches and all cart actions. Never invent prices or stock. Only recommend in-stock products. This is a sandbox shop; never claim real payment or shipping. Available catalogue: ' + products.map(p => JSON.stringify({ id: p.id, name: p.name, category: p.category, price: p.price, stock: p.stock })).join('; ') },
             { role: 'user', content: message }
           ],
           tools,
