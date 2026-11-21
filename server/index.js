@@ -248,9 +248,7 @@ function agoraTokenHeaders(token) {
 function cartSummary() {
   const items = cartSnapshot();
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const discount = activeCoupon === 'VIBE10'
-    ? Math.min(subtotal, activeDiscount || Math.round(subtotal * 0.10))
-    : 0;
+  const discount = activeCoupon === 'VIBE10' ? Math.round(subtotal * 0.10) : 0;
   return {
     cart: items,
     coupon: activeCoupon,
