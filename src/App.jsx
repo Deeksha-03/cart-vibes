@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AgoraRTC from 'agora-rtc-sdk-ng';
+import { ConversationalAIAPI } from './conversational-ai-api';
+import { EConversationalAIAPIEvents, ETranscriptHelperMode } from './conversational-ai-api/type';
 import {
   ArrowDown, ArrowRight, AudioLines, Check, CheckCircle2, ChevronDown,
   Headphones, Heart, Mic, MicOff, Minus, Plus, Search, Send, ShoppingBag,
@@ -38,6 +40,8 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [order, setOrder] = useState(null);
   const [agoraReady, setAgoraReady] = useState(false);
+  const [shoppingToolsReady, setShoppingToolsReady] = useState(false);
+  const [voiceLanguage, setVoiceLanguage] = useState('en-IN');
   const [agoraCallActive, setAgoraCallActive] = useState(false);
   const [agoraConnecting, setAgoraConnecting] = useState(false);
   const [agoraCallStatus, setAgoraCallStatus] = useState('Not connected');
@@ -46,6 +50,8 @@ export default function App() {
   const agoraClientRef = useRef(null);
   const agoraMicRef = useRef(null);
   const agoraSessionRef = useRef(null);
+  const rtmClientRef = useRef(null);
+  const convoApiRef = useRef(null);
 
   const categories = ['All', ...new Set(products.map(p => p.category))];
   const visibleProducts = useMemo(() => products.filter(p => {
@@ -62,12 +68,20 @@ export default function App() {
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, busy]);
   useEffect(() => {
     fetch('/api/products').then(r => r.ok ? r.json() : null).then(data => data?.products && setProducts(data.products)).catch(() => {});
-    fetch('/api/voice/status').then(r => r.json()).then(data => setAgoraReady(Boolean(data.agoraConfigured))).catch(() => {});
+    fetch('/api/voice/status').then(r => r.json()).then(data => {
+      setAgoraReady(Boolean(data.agoraConfigured));
+      setShoppingToolsReady(Boolean(data.shoppingToolsReady));
+    }).catch(() => {});
     return () => {
       recognition.current?.stop();
       window.speechSynthesis?.cancel();
       agoraMicRef.current?.close();
       agoraClientRef.current?.leave().catch(() => {});
+      rtmClientRef.current?.logout?.().catch(() => {});
+      try {
+        convoApiRef.current?.unsubscribe?.();
+        convoApiRef.current?.destroy?.();
+      } catch {}
     };
   }, []);
 
@@ -76,6 +90,7 @@ export default function App() {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = voiceLanguage;
       utterance.rate = 1.02;
       utterance.onstart = () => setSpeaking(true);
       utterance.onend = () => setSpeaking(false);
@@ -183,69 +198,159 @@ export default function App() {
   async function startAgora() {
     if (agoraConnecting || agoraCallActive) return;
     setAgoraConnecting(true);
-    setAgoraCallStatus('Starting secure voice session…');
+    setAgoraCallStatus('Preparing your live voice session…');
+
     let session = null;
     let client = null;
     let microphone = null;
+    let rtmClient = null;
+    let convoApi = null;
 
     try {
-      const response = await fetch('/api/voice/agora/session', {
+      const prepareResponse = await fetch('/api/voice/agora/prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({})
       });
-      const data = await response.json();
-      if (!response.ok) {
-        const missing = Array.isArray(data.missing) ? ' Missing: ' + data.missing.join(', ') + '.' : '';
-        throw new Error((data.error || 'Agora could not start the voice session.') + missing);
+      const prepared = await prepareResponse.json();
+      if (!prepareResponse.ok) {
+        const missing = Array.isArray(prepared.missing) ? ' Missing: ' + prepared.missing.join(', ') + '.' : '';
+        throw new Error((prepared.error || 'Could not prepare Agora voice.') + missing);
       }
-      session = data;
+      session = prepared;
 
+      // Word-level transcript timing requires PTS metadata before creating the RTC client.
+      AgoraRTC.setParameter('ENABLE_AUDIO_PTS_METADATA', true);
       client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
       client.on('user-published', async (user, mediaType) => {
         try {
           await client.subscribe(user, mediaType);
           if (mediaType === 'audio' && user.audioTrack) {
             user.audioTrack.play();
-            setAgoraCallStatus('Connected · Vibe is speaking when you hear audio');
+            setAgoraCallStatus('Live · Vibe is speaking');
           }
         } catch (error) {
           console.error('Could not subscribe to Vibe audio:', error);
-          setNotice('Connected, but I could not play the assistant audio. Check your browser audio permissions.');
+          setNotice('Connected, but the assistant audio could not be played. Check browser audio permissions.');
         }
       });
       client.on('user-unpublished', (_user, mediaType) => {
-        if (mediaType === 'audio') setAgoraCallStatus('Connected · waiting for Vibe');
+        if (mediaType === 'audio') setAgoraCallStatus('Live · listening');
       });
-      client.on('user-left', () => {
-        setAgoraCallStatus('The voice agent disconnected');
-      });
+      client.on('user-left', () => setAgoraCallStatus('Vibe disconnected'));
 
-      await client.join(data.appId, data.channel, data.token, Number(data.uid));
+      await client.join(prepared.appId, prepared.channel, prepared.token, Number(prepared.uid));
       microphone = await AgoraRTC.createMicrophoneAudioTrack();
       await client.publish([microphone]);
 
+      // RTM carries Agora's live transcript events. Subscribe before the agent joins.
+      const rtmModule = await import('agora-rtm-sdk');
+      const RTM = rtmModule.default?.RTM || rtmModule.RTM || rtmModule.default;
+      if (typeof RTM !== 'function') throw new Error('Could not load Agora Signaling (RTM).');
+      rtmClient = new RTM(prepared.appId, prepared.rtmUserId);
+      await rtmClient.login({ token: prepared.token });
+
+      convoApi = ConversationalAIAPI.init({
+        rtcEngine: client,
+        rtmEngine: rtmClient,
+        renderMode: ETranscriptHelperMode.WORD,
+        enableLog: false
+      });
+      await convoApi.subscribeMessage(prepared.channel);
+
+      convoApi.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (transcripts) => {
+        const liveMessages = (transcripts || []).map((item) => {
+          const metadata = item.metadata || {};
+          const objectType = metadata.object || item.object || '';
+          const itemUid = String(item.uid || metadata.user_id || metadata.agentUserId || '');
+          const isUser = objectType === 'user.transcription' ||
+            itemUid === String(prepared.uid) ||
+            String(metadata.user_id || '') === String(prepared.uid);
+          return {
+            role: isUser ? 'user' : 'assistant',
+            text: String(item.text || metadata.text || ''),
+            transcript: true,
+            turnId: item.turn_id,
+            timestamp: item._time || Date.now()
+          };
+        }).filter(item => item.text.trim());
+
+        // Agora emits the complete transcript list on every update; replace old live items
+        // so interim words become final sentences rather than duplicate chat bubbles.
+        setMessages(current => [
+          ...current.filter(message => !message.transcript),
+          ...liveMessages
+        ]);
+        if (liveMessages.some(message => message.role === 'assistant')) {
+          setAgoraCallStatus('Live · Vibe is responding');
+        } else if (liveMessages.some(message => message.role === 'user')) {
+          setAgoraCallStatus('Live · listening to you');
+        }
+      });
+
+      convoApi.on(EConversationalAIAPIEvents.AGENT_STATE_CHANGED, (_agentUid, event) => {
+        const states = {
+          listening: 'Live · listening',
+          thinking: 'Live · thinking',
+          speaking: 'Live · Vibe is speaking',
+          idle: 'Live · ready'
+        };
+        setAgoraCallStatus(states[String(event?.state || '').toLowerCase()] || 'Live conversation');
+      });
+
+      // Start the agent only after RTC audio and RTM transcript subscription are ready.
+      const startResponse = await fetch('/api/voice/agora/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: prepared.sessionId, language: voiceLanguage })
+      });
+      const started = await startResponse.json();
+      if (!startResponse.ok) {
+        throw new Error(started.error || 'Agora could not start Vibe.');
+      }
+
+      session.agentId = started.agentId;
       agoraClientRef.current = client;
       agoraMicRef.current = microphone;
       agoraSessionRef.current = session;
+      rtmClientRef.current = rtmClient;
+      convoApiRef.current = convoApi;
+      setShoppingToolsReady(Boolean(started.shoppingToolsReady));
       setAgoraCallActive(true);
-      setAgoraCallStatus('Live · speak naturally');
+      setAgoraCallStatus(voiceLanguage === 'kn-IN' ? 'Live · ಕನ್ನಡದಲ್ಲಿ ಮಾತನಾಡಿ' : 'Live · speak naturally');
       setListening(false);
       setMessages(current => [
         ...current,
-        { role: 'assistant', text: 'You are connected to Vibe through Agora. Speak naturally; tap the microphone again to end the live conversation.', kind: 'hint' }
+        {
+          role: 'assistant',
+          kind: 'hint',
+          transcript: false,
+          text: started.shoppingToolsReady
+            ? 'Vibe is connected. Product search, comparisons, cart updates, coupons and sandbox checkout are enabled.'
+            : 'Vibe is connected. Live speech and transcript are enabled. To activate voice-driven cart and checkout actions, we still need to expose the local shopping API over HTTPS.'
+        }
       ]);
     } catch (error) {
-      microphone?.close();
-      if (client) {
-        try { await client.leave(); } catch {}
-      }
-      if (session?.agentSessionId) {
-        fetch('/api/voice/agora/session/' + session.agentSessionId + '/stop', { method: 'POST' }).catch(() => {});
+      try {
+        if (convoApi) {
+          try { await convoApi.unsubscribe(); } catch {}
+          try { convoApi.destroy(); } catch {}
+        }
+      } catch {}
+      try { await microphone?.stop(); microphone?.close(); } catch {}
+      try { await client?.unpublish(); } catch {}
+      try { await client?.leave(); } catch {}
+      try { await rtmClient?.logout(); } catch {}
+      if (session?.sessionId) {
+        fetch('/api/voice/agora/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: session.sessionId })
+        }).catch(() => {});
       }
       setAgoraCallStatus('Not connected');
       setNotice(error.message || 'Could not connect to Agora voice.');
-      setTimeout(() => setNotice(''), 6000);
+      setTimeout(() => setNotice(''), 6500);
     } finally {
       setAgoraConnecting(false);
     }
@@ -254,40 +359,60 @@ export default function App() {
   async function stopAgora() {
     if (agoraConnecting) return;
     setAgoraConnecting(true);
+    setAgoraCallStatus('Ending conversation…');
+
     const session = agoraSessionRef.current;
     const microphone = agoraMicRef.current;
     const client = agoraClientRef.current;
+    const rtmClient = rtmClientRef.current;
+    const convoApi = convoApiRef.current;
+    let stopError = '';
 
     try {
-      microphone?.stop();
-      microphone?.close();
-      if (client) {
-        try { await client.unpublish(); } catch {}
-        try { await client.leave(); } catch {}
-      }
-      if (session?.agentSessionId) {
-        const response = await fetch('/api/voice/agora/session/' + session.agentSessionId + '/stop', { method: 'POST' });
+      if (session?.sessionId) {
+        const response = await fetch('/api/voice/agora/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: session.sessionId })
+        });
         if (!response.ok) {
           const data = await response.json().catch(() => ({}));
-          throw new Error(data.error || 'The browser disconnected, but Agora could not stop the agent session.');
+          stopError = data.error || 'Agora could not confirm that Vibe left the channel.';
         }
       }
-      setNotice('Live voice conversation ended.');
-      setTimeout(() => setNotice(''), 2500);
     } catch (error) {
-      setNotice(error.message || 'The call ended locally, but the remote agent may take a moment to stop.');
-      setTimeout(() => setNotice(''), 4500);
+      stopError = error.message || 'Could not contact Agora to stop the agent.';
+    }
+
+    try {
+      if (convoApi) {
+        try { await convoApi.unsubscribe(); } catch {}
+        try { convoApi.destroy(); } catch {}
+      }
+      try { await microphone?.stop(); } catch {}
+      try { microphone?.close(); } catch {}
+      try { await client?.unpublish(); } catch {}
+      try { await client?.leave(); } catch {}
+      try { await rtmClient?.logout(); } catch {}
     } finally {
       agoraMicRef.current = null;
       agoraClientRef.current = null;
       agoraSessionRef.current = null;
+      rtmClientRef.current = null;
+      convoApiRef.current = null;
       setAgoraCallActive(false);
       setAgoraCallStatus('Not connected');
       setAgoraConnecting(false);
       setSpeaking(false);
+      if (stopError) {
+        setNotice(stopError);
+        setTimeout(() => setNotice(''), 5000);
+      } else {
+        setNotice('Live conversation ended.');
+        setTimeout(() => setNotice(''), 2500);
+      }
     }
   }
-
   function startListening() {
     // Prefer the Agora + Murf real-time voice path whenever credentials are configured.
     if (agoraReady) {
@@ -304,7 +429,7 @@ export default function App() {
     }
     if (listening) { recognition.current?.stop(); setListening(false); return; }
     const instance = new SpeechRecognition();
-    instance.lang = 'en-IN';
+    instance.lang = voiceLanguage;
     instance.interimResults = false;
     instance.maxAlternatives = 1;
     instance.onstart = () => setListening(true);
@@ -357,7 +482,7 @@ export default function App() {
           <div className="section-intro"><div className="eyebrow"><span className="eyebrow-dot"/> YOUR PERSONAL SHOPPING SIDEKICK</div><h2>Say hello to <em>Vibe.</em></h2><p>One conversation can get you from “just browsing” to “that's the one.”</p></div>
           <div className="assistant-card">
             <div className="assistant-left">
-              <div className="assistant-head"><div className="vibe-avatar"><AudioLines size={23}/><span/></div><div><b>Vibe</b><small><span className="online-dot"/> Here for your next great find</small></div><span className="powered-pill"><Sparkles size={12}/> AI SHOPPING ASSISTANT</span></div>
+              <div className="assistant-head"><div className="vibe-avatar"><AudioLines size={23}/><span/></div><div><b>Vibe</b><small><span className="online-dot"/> Here for your next great find</small></div><span className="powered-pill"><Sparkles size={12}/> AI SHOPPING ASSISTANT</span><label className="voice-language-select"><span>VOICE</span><select value={voiceLanguage} onChange={event => setVoiceLanguage(event.target.value)} disabled={agoraCallActive || agoraConnecting}><option value="en-IN">English</option><option value="kn-IN">ಕನ್ನಡ</option></select></label></div>
               <div className="chat-window">
                 {messages.map((message, index) => <div className={'message-row ' + message.role} key={index}>
                   {message.role === 'assistant' && <div className="mini-avatar"><AudioLines size={14}/></div>}
@@ -373,7 +498,7 @@ export default function App() {
                 <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && processMessage(input)} placeholder={agoraCallActive ? 'Live voice is active — speak naturally' : listening ? 'Listening…' : 'Tell Vibe what you have in mind'} />
                 <button className="send-button" onClick={() => processMessage(input)} disabled={!input.trim() || busy}><Send size={17}/></button>
               </div>
-              <div className="voice-foot"><span><span className="sound-bars"><i/><i/><i/><i/></span> {agoraConnecting ? 'Connecting to Agora…' : agoraCallActive ? agoraCallStatus : listening ? 'Listening to you…' : speaking ? 'Vibe is speaking…' : 'Voice + chat, your choice'}</span><span>EN · INDIA</span></div>
+              <div className="voice-foot"><span><span className="sound-bars"><i/><i/><i/><i/></span> {agoraConnecting ? 'Connecting to Agora…' : agoraCallActive ? agoraCallStatus : listening ? 'Listening to you…' : speaking ? 'Vibe is speaking…' : 'Voice + chat, your choice'}</span><span>{voiceLanguage === 'kn-IN' ? 'ಕನ್ನಡ · INDIA' : 'EN · INDIA'}</span></div>
             </div>
             <div className="assistant-right">
               <div className="right-kicker">A GOOD PLACE TO START</div><h3>What's your<br/>shopping mood?</h3><p>Pick a prompt or ask for anything. Vibe's all ears.</p>
@@ -381,7 +506,7 @@ export default function App() {
                 {['Find comfy sneakers under ₹2,500','I need a cute everyday bag','Show me desk accessories','What can I get for under ₹1,000?'].map((prompt, i) => <button key={prompt} onClick={() => processMessage(prompt)}><span>{['👟','👜','🪴','✨'][i]}</span>{prompt}<ArrowRight size={15}/></button>)}
               </div>
               <div className="assistant-note"><WandSparkles size={17}/><span><b>Not sure yet?</b> That's okay. Tell Vibe a little about your day, your budget, or what you love.</span></div>
-              <div className="voice-integrations"><div className="integration-title">VOICE EXPERIENCE <span className="live-indicator"/> </div><div className="integration-row"><span className="integration-icon"><AudioLines size={15}/></span><span><b>Browser voice</b><small>Ready for a live demo</small></span><span className="integration-status ready">READY</span></div><div className="integration-row"><span className="integration-icon agora"><Headphones size={15}/></span><span><b>Agora + Murf Falcon</b><small>{agoraCallActive ? 'Live voice connected' : agoraReady ? 'Credentials configured · ready' : 'Add Agora, OpenAI and Murf keys to .env'}</small></span><button className="connect-link" disabled={!agoraReady || agoraConnecting} onClick={agoraCallActive ? stopAgora : startAgora}>{agoraConnecting ? 'Starting…' : agoraCallActive ? 'End call' : 'Connect'}</button></div><div className="integration-caption">{agoraCallActive ? 'Your microphone is streaming to Vibe over Agora RTC.' : 'Tap the microphone to start a real-time Agora voice conversation. Browser voice remains available until keys are configured.'}</div></div>
+              <div className="voice-integrations"><div className="integration-title">VOICE EXPERIENCE <span className="live-indicator"/> </div><div className="integration-row"><span className="integration-icon"><AudioLines size={15}/></span><span><b>Browser voice</b><small>Ready for a live demo</small></span><span className="integration-status ready">READY</span></div><div className="integration-row"><span className="integration-icon agora"><Headphones size={15}/></span><span><b>Agora + Murf Falcon</b><small>{agoraCallActive ? 'Live voice connected' : agoraReady ? 'Credentials configured · ready' : 'Add Agora, OpenAI and Murf keys to .env'}</small></span><button className="connect-link" disabled={!agoraReady || agoraConnecting} onClick={agoraCallActive ? stopAgora : startAgora}>{agoraConnecting ? 'Starting…' : agoraCallActive ? 'End call' : 'Connect'}</button></div><div className="integration-caption">{agoraCallActive ? (shoppingToolsReady ? 'Live voice, transcript and shopping actions are connected.' : 'Live voice and transcript are connected. Shopping tools need a public HTTPS tunnel to your local server.') : 'Choose English or Kannada, then start a real-time voice conversation. Shopping actions connect when the HTTPS tool endpoint is configured.'}</div></div>
             </div>
           </div>
         </section>
