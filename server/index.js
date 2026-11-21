@@ -603,7 +603,7 @@ app.post('/api/voice/agora/start', async (req, res) => {
   const language = req.body?.language === 'kn-IN' ? 'kn-IN' : 'en-IN';
   const asrLanguage = language === 'kn-IN' ? 'kn' : 'en-IN';
   const voiceId = process.env.MURF_VOICE_ID || 'Neeta';
-  const ttsModel = process.env.MURF_MODEL || 'FALCON';
+  const ttsModel = process.env.MURF_MODEL || 'falcon-2.1';
   const ttsStyle = process.env.MURF_STYLE || 'Conversational';
   const ttsLocale = language;
   const toolBaseUrl = getPublicToolBaseUrl();
