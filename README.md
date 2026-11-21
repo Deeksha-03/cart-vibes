@@ -33,6 +33,8 @@ CartVibes is a voice-first conversational shopping prototype. This milestone con
 |---|---|---|
 | `AGORA_APP_ID` | Agora Console → Project → Manage credentials | Identifies the Agora project |
 | `AGORA_APP_CERTIFICATE` | Same Agora credentials panel | Used by the server to generate RTC tokens |
+| `AGORA_ASR_MODEL` | `nova-3` or `nova-2`; default `nova-3` | Deepgram speech-to-text model |
+| `AGORA_ASR_LANGUAGE` | Deepgram language code; default `en-IN` | Recognition language |
 | `AGORA_LLM_MODEL` | Choose a model supported by Agora managed mode; default `gpt-4o-mini` | Selects the Agora-managed LLM |
 | `OPENAI_API_KEY` | OpenAI API dashboard (optional) | Used only by the separate website text-chat endpoint, not live Agora voice |
 | `MURF_API_KEY` | Murf API dashboard | Murf Falcon text-to-speech |
