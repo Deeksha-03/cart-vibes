@@ -1,68 +1,77 @@
 # CartVibes
 
-A conversational commerce prototype: discover products, compare options, add items to a cart, apply a coupon, and complete a sandbox checkout.
+CartVibes is a voice-first conversational shopping prototype. This milestone connects the browser microphone to Agora RTC, starts an Agora Conversational AI Platform (Preview) session, and plays the agent's Murf Falcon voice back in the browser.
 
-## What's working in this prototype
+## Current capabilities
 
-- Responsive React + Vite shopping experience.
-- Conversational shopping assistant with catalogue search, recommendation and action tools. Add an OpenAI API key to enable LLM-based tool selection; deterministic fallback works without one.
-- Browser voice input (Web Speech API) and spoken responses (Speech Synthesis API). Use Chrome and allow microphone access.
-- Express API for catalogue, cart updates, coupon validation, sandbox order creation, and order lookup.
-- Demo coupon: `VIBE10` (10% off).
-- Optional Agora Conversational AI start endpoint, with Murf Falcon TTS configuration template.
+- Responsive React + Vite storefront and sample product catalogue.
+- Browser voice fallback using Web Speech APIs.
+- **Agora live voice path:** the browser joins an RTC channel, publishes microphone audio, subscribes to the agent's audio, and stops the remote agent session when the call ends.
+- A server-side ephemeral Agora agent configuration is created for each call.
+- The agent uses Agora-managed Deepgram ASR, OpenAI BYOK for LLM reasoning, and Murf BYOK with the Falcon TTS model.
+- Existing Express endpoints for catalogue, cart updates, coupon validation, sandbox orders and an optional chat-based LLM shopping assistant.
 
-**Important:** checkout is a sandbox action. It does not charge a card, create a real merchant order, or ship goods. Product catalogue and inventory are sample data stored in memory and reset when the server restarts.
+## Important prototype boundaries
 
-## Run locally (Mac)
+- The live Agora + Murf flow provides real-time voice transport and spoken agent responses, but **shopping tools are not connected to the Agora voice agent yet**. The live agent is explicitly instructed not to claim that it changed a cart or placed an order.
+- Product catalogue and inventory are sample in-memory data. Cart and demo orders are local to the running server and reset when it restarts.
+- Checkout is sandbox only. No card is charged and no real merchant order or delivery is created.
+- Agora's new Conversational AI Platform is in Preview; during Preview, agent sessions run in North America (US). Expect possible additional latency from India.
 
-1. Install Node.js (already installed for this project).
-2. Open Terminal and move into the folder where you cloned this repository:
-   ```bash
-   cd cart-vibes
-   ```
-3. Install packages:
-   ```bash
-   npm install
-   ```
-4. Start the frontend and backend:
-   ```bash
-   npm run dev
-   ```
-5. Open **http://localhost:5173** in Chrome.
+## Local setup (Mac)
 
-Stop the app with `Control + C` in Terminal.
+1. Copy `.env.example` to `.env` in the project root.
+2. Fill in the Agora, OpenAI and Murf credentials below.
+3. Install packages with `npm install`.
+4. Start the app with `npm run dev`.
+5. Open [http://localhost:5173](http://localhost:5173) in Chrome and allow microphone access.
+6. Click the microphone in the assistant panel to start or stop the Agora live voice conversation once credentials are configured. Without credentials, the microphone uses the browser voice fallback.
 
-## Voice
+## Environment variables
 
-The default demo uses browser speech recognition and speech synthesis so the end-to-end shopping journey can be tried without API keys. Voice recognition availability depends on browser support and microphone permission.
+| Variable | Where to get it | Purpose |
+|---|---|---|
+| `AGORA_APP_ID` | Agora Console → Project → Manage credentials | Identifies the Agora project |
+| `AGORA_APP_CERTIFICATE` | Same Agora credentials panel | Used by the server to generate RTC tokens |
+| `AGORA_CUSTOMER_ID` | Agora account → RESTful API credentials | Authenticates server-side Platform API requests |
+| `AGORA_CUSTOMER_SECRET` | Same RESTful API credentials section | Authenticates server-side Platform API requests |
+| `OPENAI_API_KEY` | OpenAI API dashboard | Agent reasoning model |
+| `MURF_API_KEY` | Murf API dashboard | Murf Falcon text-to-speech |
 
-## Agora + Murf setup (next integration step)
+`AGORA_AGENT_UID` is a numeric RTC identity reserved for the remote voice agent; the default is `1002`.
 
-1. Copy `.env.example` to `.env`.
-2. Add Agora App ID, Customer ID, Customer Secret, an RTC channel, and a valid RTC token for the agent UID.
-3. Add your Murf API key to `MURF_API_KEY`.
-4. Publish an agent in Agora Conversational AI Studio and configure its ASR, LLM and Murf TTS provider there. For Murf, use the BYOK secret-set flow in Agora and select the Falcon model. Copy the published pipeline ID into `AGORA_PIPELINE_ID`.
-5. Set an RTC channel and a valid token for the agent UID. The token's channel and UID must match the values in `.env`.
-6. Restart the server. The **Test** action beside Agora calls the server-side `/join` endpoint; credentials remain server-side.
+The App Certificate, Customer Secret, OpenAI key and Murf key are read only by the Express server. Do not add real credentials to GitHub or frontend code. The `.env` file is excluded by `.gitignore`.
 
-The current browser interface does not yet join the Agora RTC channel or stream the agent's audio into the browser. That requires the RTC client/token flow and is a follow-on integration. Do not commit `.env` or expose provider secrets in frontend code.
+## Agora voice architecture
 
-Agora docs: https://docs.agora.io/en/conversational-ai/overview/product-overview  
-Agora join API: https://docs.agora.io/en/api-reference/conversational-ai  
-Murf + Agora: https://docs.agora.io/en/ai/models/tts/murf  
-Murf API: https://murf.ai/api/docs/text-to-speech/overview
+When the customer starts a call:
 
-## Project layout
+1. Express generates a unique RTC channel and separate publisher tokens for the browser user and remote agent.
+2. Express starts an ephemeral Conversational AI Platform session using server-side REST authentication.
+3. The ephemeral agent uses managed Deepgram ASR, OpenAI BYOK for the LLM, and Murf BYOK with model `FALCON` for TTS.
+4. The browser joins the same channel with Agora RTC Web SDK, publishes microphone audio and plays the subscribed agent audio.
+5. The customer can end the call; the browser leaves RTC and Express requests that Agora stop the agent session.
 
-- `src/App.jsx` — storefront, assistant, voice controls, cart and checkout UI.
-- `src/styles.css` — responsive styling.
-- `server/index.js` — catalogue, cart, coupon, order and optional Agora API routes.
-- `.env.example` — names of optional server-side credentials.
+The implementation follows the current Agora Platform Preview session API, Agora Web RTC SDK 4.x, and Murf's Platform TTS configuration.
 
-## Next milestones
+## Next milestone
 
-1. Connect Agora Web SDK to the browser and generate RTC tokens on the server.
-2. Configure the published Agora agent with Murf Falcon and an LLM.
-3. Add proper LLM tool calling for catalogue, inventory, cart, discounts and checkout.
-4. Persist carts and orders in a database.
-5. Replace sandbox checkout with a payment-provider sandbox integration.
+Connect Agora custom tool calling to secure HTTPS shopping endpoints so the voice agent can search the catalogue, check inventory, add items to the cart, apply discounts, and request explicit confirmation before sandbox checkout. Agora's cloud agent needs a publicly reachable HTTPS endpoint for tool calls; localhost alone is not reachable from Agora.
+
+## Run commands
+
+```bash
+npm install
+npm run dev
+```
+
+Stop the dev server with `Control + C`.
+
+## Useful documentation
+
+- Agora Platform overview: https://docs.agora.io/en/ai/platform
+- Agora start/stop sessions: https://docs.agora.io/en/ai/platform/get-started/start-stop-agent
+- Agora REST API (Preview): https://docs.agora.io/en/api-reference/api-ref/conversational-ai/platform
+- Agora RESTful authentication: https://docs.agora.io/en/api-reference/api-ref/conversational-ai/platform/authentication
+- Agora Web SDK: https://docs.agora.io/en/realtime-media/rtc/get-started-sdk/web
+- Murf Falcon integration: https://docs.agora.io/en/ai/platform/models/tts/murf
