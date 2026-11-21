@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { ConvoAITokenBuilder, RtcTokenBuilder, RtcRole } = require('agora-token');
-const { AccessToken2, ServiceConvoAI } = require('agora-token/src/AccessToken2');
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
+const { ConvoAITokenBuilder } = require('./vendor/agora-token/src/ConvoAITokenBuilder');
 
 dotenv.config();
 const app = express();
