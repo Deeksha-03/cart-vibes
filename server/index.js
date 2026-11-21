@@ -4,6 +4,10 @@ import dotenv from 'dotenv';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
 
 dotenv.config();
 const app = express();
@@ -195,37 +199,191 @@ app.post('/api/assistant', async (req, res) => {
   }
   res.json({ reply, products: matches.slice(0, 3), action });
 });
-app.get('/api/voice/status', (_req, res) => res.json({
-  agoraConfigured: Boolean(process.env.AGORA_APP_ID && process.env.AGORA_CUSTOMER_ID && process.env.AGORA_CUSTOMER_SECRET && process.env.AGORA_CHANNEL && process.env.AGORA_AGENT_TOKEN)
-}));
-app.post('/api/voice/agora/start', async (_req, res) => {
-  const { AGORA_APP_ID, AGORA_CUSTOMER_ID, AGORA_CUSTOMER_SECRET, AGORA_CHANNEL, AGORA_AGENT_TOKEN, AGORA_PIPELINE_ID } = process.env;
-  if (!AGORA_APP_ID || !AGORA_CUSTOMER_ID || !AGORA_CUSTOMER_SECRET || !AGORA_CHANNEL || !AGORA_AGENT_TOKEN || !AGORA_PIPELINE_ID) {
-    return res.status(503).json({ error: 'Add Agora credentials and a published AGORA_PIPELINE_ID to .env. Configure Murf Falcon TTS in that Agora Studio agent first.' });
+
+function agoraConfigMissing() {
+  return [
+    'AGORA_APP_ID',
+    'AGORA_APP_CERTIFICATE',
+    'AGORA_CUSTOMER_ID',
+    'AGORA_CUSTOMER_SECRET',
+    'OPENAI_API_KEY',
+    'MURF_API_KEY'
+  ].filter(key => !process.env[key]);
+}
+
+function agoraRestHeaders() {
+  const credentials = Buffer.from(
+    process.env.AGORA_CUSTOMER_ID + ':' + process.env.AGORA_CUSTOMER_SECRET
+  ).toString('base64');
+  return { Authorization: 'Basic ' + credentials, 'Content-Type': 'application/json' };
+}
+
+function buildRtcToken(channel, uid) {
+  return RtcTokenBuilder.buildTokenWithUid(
+    process.env.AGORA_APP_ID,
+    process.env.AGORA_APP_CERTIFICATE,
+    channel,
+    uid,
+    RtcRole.PUBLISHER,
+    3600,
+    3600
+  );
+}
+
+app.get('/api/voice/status', (_req, res) => {
+  const missing = agoraConfigMissing();
+  res.json({
+    agoraConfigured: missing.length === 0,
+    missing,
+    voiceProvider: 'Agora Conversational AI Platform + Murf Falcon'
+  });
+});
+
+// Start an ephemeral agent session. Provider keys and Agora credentials stay server-side.
+app.post('/api/voice/agora/session', async (_req, res) => {
+  const missing = agoraConfigMissing();
+  if (missing.length) {
+    return res.status(503).json({ error: 'Agora voice is not configured yet.', missing });
   }
+
+  const channel = 'cv-' + crypto.randomBytes(10).toString('hex');
+  const userUid = crypto.randomInt(100000, 999999);
+  const agentUid = Number(process.env.AGORA_AGENT_UID || 1002);
+  if (!Number.isInteger(agentUid) || agentUid <= 0 || agentUid === userUid) {
+    return res.status(500).json({ error: 'AGORA_AGENT_UID must be a positive integer different from the browser UID.' });
+  }
+
   try {
-    const credentials = Buffer.from(AGORA_CUSTOMER_ID + ':' + AGORA_CUSTOMER_SECRET).toString('base64');
-    const payload = {
-      name: 'cartvibes-' + Date.now(),
-      pipeline_id: AGORA_PIPELINE_ID,
-      properties: {
-        channel: AGORA_CHANNEL,
-        token: AGORA_AGENT_TOKEN,
-        agent_rtc_uid: process.env.AGORA_AGENT_UID || '1002',
-        remote_rtc_uids: [process.env.AGORA_REMOTE_UID || '1001'],
-        enable_string_uid: true
+    const userToken = buildRtcToken(channel, userUid);
+    const agentToken = buildRtcToken(channel, agentUid);
+    const catalogSummary = products.map(product =>
+      `${product.name}: ₹${product.price}, ${product.stock > 0 ? product.stock + ' in stock' : 'out of stock'}`
+    ).join('; ');
+
+    const agent = {
+      instructions: [
+        'You are Vibe, the friendly, voice-first shopping assistant for CartVibes.',
+        'Speak naturally and keep responses concise, like a helpful shopping companion.',
+        'Ask a brief clarifying question when the category, use case, or budget is unclear.',
+        'Never invent products, prices, ratings, discounts, or stock. Use only this sample catalogue: ' + catalogSummary,
+        'Be clear that this is a sample demo catalogue. Do not claim to add items to a cart, apply coupons, place orders, charge a payment method, or track shipping. Shopping tools will be connected in a later milestone.',
+        'When a customer asks for an action that is not available yet, explain that clearly and continue helping with product discovery.'
+      ].join(' '),
+      greeting: {
+        mode: 'text',
+        on: 'each_join',
+        text: "Hey! I'm Vibe from CartVibes. Tell me what you're shopping for, and we'll find something great together."
+      },
+      pipeline: {
+        mode: 'cascaded',
+        asr: {
+          credential: { mode: 'managed' },
+          vendor: 'deepgram',
+          model: 'nova-3',
+          language: process.env.AGORA_ASR_LANGUAGE || 'en-IN'
+        },
+        llm: {
+          credential: { mode: 'byok', fields: { api_key: process.env.OPENAI_API_KEY } },
+          vendor: 'openai',
+          style: 'openai',
+          model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+        },
+        tts: {
+          credential: { mode: 'byok', fields: { api_key: process.env.MURF_API_KEY } },
+          vendor: 'murf',
+          url: 'wss://global.api.murf.ai/v1/speech/stream-input',
+          params: {
+            voiceId: process.env.MURF_VOICE_ID || 'Matthew',
+            locale: process.env.MURF_LOCALE || 'en-US',
+            rate: 0,
+            pitch: 0,
+            model: 'FALCON',
+            sample_rate: 24000
+          }
+        }
       }
     };
-    const upstream = await fetch('https://api.agora.io/api/conversational-ai-agent/v2/projects/' + AGORA_APP_ID + '/join', {
-      method: 'POST',
-      headers: { Authorization: 'Basic ' + credentials, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+
+    const payload = {
+      agent,
+      transport: {
+        type: 'rtc',
+        channel,
+        token: agentToken,
+        uid: String(agentUid),
+        subscribe_uids: [String(userUid)],
+        audio_scenario: 'aiserver'
+      },
+      lifecycle: {
+        idle_timeout_ms: 30000,
+        max_duration_ms: 3600000,
+        graceful_stop: { enabled: true, timeout_ms: 10000 }
+      },
+      data_policy: { retention: 'none' }
+    };
+
+    const upstream = await fetch(
+      'https://preview.ai.agora.io/conversational-ai/v1/projects/' +
+        encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/ephemeral',
+      {
+        method: 'POST',
+        headers: { ...agoraRestHeaders(), 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify(payload)
+      }
+    );
+    const responseText = await upstream.text();
+    let data = {};
+    try { data = responseText ? JSON.parse(responseText) : {}; }
+    catch { data = { detail: responseText }; }
+
+    if (!upstream.ok) {
+      console.error('Agora session start failed:', upstream.status, data);
+      return res.status(upstream.status).json({
+        error: data.detail || data.message || data.reason || 'Agora could not start the voice session.',
+        reason: data.reason
+      });
+    }
+
+    return res.json({
+      appId: process.env.AGORA_APP_ID,
+      channel,
+      token: userToken,
+      uid: userUid,
+      agentSessionId: data.agent_session_id,
+      status: data.status
     });
-    const data = await upstream.json();
-    if (!upstream.ok) return res.status(upstream.status).json({ error: data.message || data.reason || 'Agora could not start the agent.', details: data });
-    res.json(data);
   } catch (error) {
-    res.status(502).json({ error: 'Could not reach Agora: ' + error.message });
+    console.error('Agora session setup failed:', error);
+    return res.status(502).json({ error: 'Could not start the Agora voice session: ' + error.message });
+  }
+});
+
+app.post('/api/voice/agora/session/:sessionId/stop', async (req, res) => {
+  const missing = ['AGORA_APP_ID', 'AGORA_CUSTOMER_ID', 'AGORA_CUSTOMER_SECRET']
+    .filter(key => !process.env[key]);
+  if (missing.length) return res.status(503).json({ error: 'Agora stop credentials are missing.', missing });
+
+  const sessionId = String(req.params.sessionId || '');
+  if (!/^[a-z0-9]{32}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid Agora session ID.' });
+
+  try {
+    const upstream = await fetch(
+      'https://preview.ai.agora.io/conversational-ai/v1/projects/' +
+        encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/' +
+        encodeURIComponent(sessionId) + '/stop',
+      { method: 'POST', headers: agoraRestHeaders() }
+    );
+    const responseText = await upstream.text();
+    let data = {};
+    try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        error: data.detail || data.message || data.reason || 'Agora could not stop the session.'
+      });
+    }
+    return res.json({ stopped: true, agentSessionId: sessionId });
+  } catch (error) {
+    return res.status(502).json({ error: 'Could not stop the Agora voice session: ' + error.message });
   }
 });
 
