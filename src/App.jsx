@@ -83,11 +83,9 @@ export default function App() {
       setTimeout(() => setNotice(''), 2600);
       return true;
     } catch (error) {
-      setCart(current => {
-        const found = current.find(item => item.id === product.id);
-        return found ? current.map(item => item.id === product.id ? { ...item, quantity: item.quantity + quantity } : item) : [...current, { ...product, quantity }];
-      });
-      return true;
+      setNotice(error.message || 'Could not add this item. Please try again.');
+      setTimeout(() => setNotice(''), 3000);
+      return false;
     }
   }
 
@@ -148,8 +146,8 @@ export default function App() {
       if (data.action?.type === 'add_to_cart') {
         const product = products.find(p => p.id === data.action.productId);
         if (product) {
-          await addToCart(product, data.action.quantity || 1);
-          reply += ` I've added ${product.name} to your bag.`;
+          const added = await addToCart(product, data.action.quantity || 1);
+          reply += added ? ` I've added ${product.name} to your bag.` : ' I could not add that item because it may be out of stock.';
         }
       } else if (data.action?.type === 'apply_coupon') {
         try {
