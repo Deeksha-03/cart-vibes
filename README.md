@@ -79,7 +79,7 @@ Restart `npm run dev` after editing `.env`. The `/api/voice/status` endpoint rep
 | `AGORA_LLM_MODEL` | Agora-managed LLM; default `gpt-4o-mini` |
 | `MURF_API_KEY` | Murf API key |
 | `MURF_VOICE_ID` | Default `Neeta` |
-| `MURF_MODEL` | Default `FALCON` (Murf's Falcon 2.1-compatible identifier) |
+| `MURF_MODEL` | Default `falcon-2.1` (Murf's canonical Falcon 2.1 identifier) |
 | `MURF_STYLE` | `Conversational` |
 | `AGORA_PUBLIC_BASE_URL` | Public HTTPS base URL for agent tool calls |
 | `AGORA_TOOL_SHARED_SECRET` | Secret protecting the shopping tool endpoint |
