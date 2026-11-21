@@ -296,7 +296,7 @@ app.post('/api/voice/agora/session', async (_req, res) => {
         asr: {
           credential: { mode: 'managed' },
           vendor: 'deepgram',
-          model: 'nova-3',
+          model: process.env.AGORA_ASR_MODEL || 'nova-3',
           language: process.env.AGORA_ASR_LANGUAGE || 'en-IN'
         },
         llm: {
