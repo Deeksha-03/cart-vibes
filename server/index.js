@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { RtcTokenBuilder, RtcRole } = require('agora-token');
+const { ConvoAITokenBuilder, RtcTokenBuilder, RtcRole } = require('agora-token');
+const { AccessToken2, ServiceConvoAI } = require('agora-token/src/AccessToken2');
 
 dotenv.config();
 const app = express();
@@ -201,21 +202,37 @@ app.post('/api/assistant', async (req, res) => {
 });
 
 function agoraConfigMissing() {
-  return [
-    'AGORA_APP_ID',
-    'AGORA_APP_CERTIFICATE',
-    'AGORA_CUSTOMER_ID',
-    'AGORA_CUSTOMER_SECRET',
-    'OPENAI_API_KEY',
-    'MURF_API_KEY'
-  ].filter(key => !process.env[key]);
+  return ['AGORA_APP_ID', 'AGORA_APP_CERTIFICATE', 'MURF_API_KEY']
+    .filter(key => !process.env[key]);
 }
 
-function agoraRestHeaders() {
-  const credentials = Buffer.from(
-    process.env.AGORA_CUSTOMER_ID + ':' + process.env.AGORA_CUSTOMER_SECRET
-  ).toString('base64');
-  return { Authorization: 'Basic ' + credentials, 'Content-Type': 'application/json' };
+function agoraTokenHeaders(token) {
+  return {
+    Authorization: 'agora token="' + token + '"',
+    'Content-Type': 'application/json'
+  };
+}
+
+function buildConvoAiToken(channel, uid) {
+  return ConvoAITokenBuilder.buildToken(
+    process.env.AGORA_APP_ID,
+    process.env.AGORA_APP_CERTIFICATE,
+    channel,
+    String(uid),
+    3600,
+    3600
+  );
+}
+
+function buildConvoAiOnlyToken() {
+  const token = new AccessToken2(
+    process.env.AGORA_APP_ID,
+    process.env.AGORA_APP_CERTIFICATE,
+    null,
+    3600
+  );
+  token.add_service(new ServiceConvoAI());
+  return token.build();
 }
 
 function buildRtcToken(channel, uid) {
@@ -255,7 +272,7 @@ app.post('/api/voice/agora/session', async (_req, res) => {
 
   try {
     const userToken = buildRtcToken(channel, userUid);
-    const agentToken = buildRtcToken(channel, agentUid);
+    const agentToken = buildConvoAiToken(channel, agentUid);
     const catalogSummary = products.map(product =>
       `${product.name}: ₹${product.price}, ${product.stock > 0 ? product.stock + ' in stock' : 'out of stock'}`
     ).join('; ');
@@ -283,10 +300,10 @@ app.post('/api/voice/agora/session', async (_req, res) => {
           language: process.env.AGORA_ASR_LANGUAGE || 'en-IN'
         },
         llm: {
-          credential: { mode: 'byok', fields: { api_key: process.env.OPENAI_API_KEY } },
+          credential: { mode: 'managed' },
           vendor: 'openai',
           style: 'openai',
-          model: process.env.OPENAI_MODEL || 'gpt-4o-mini'
+          model: process.env.AGORA_LLM_MODEL || 'gpt-4o-mini'
         },
         tts: {
           credential: { mode: 'byok', fields: { api_key: process.env.MURF_API_KEY } },
@@ -327,7 +344,7 @@ app.post('/api/voice/agora/session', async (_req, res) => {
         encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/ephemeral',
       {
         method: 'POST',
-        headers: { ...agoraRestHeaders(), 'Idempotency-Key': crypto.randomUUID() },
+        headers: { ...agoraTokenHeaders(agentToken), 'Idempotency-Key': crypto.randomUUID() },
         body: JSON.stringify(payload)
       }
     );
@@ -359,7 +376,7 @@ app.post('/api/voice/agora/session', async (_req, res) => {
 });
 
 app.post('/api/voice/agora/session/:sessionId/stop', async (req, res) => {
-  const missing = ['AGORA_APP_ID', 'AGORA_CUSTOMER_ID', 'AGORA_CUSTOMER_SECRET']
+  const missing = ['AGORA_APP_ID', 'AGORA_APP_CERTIFICATE']
     .filter(key => !process.env[key]);
   if (missing.length) return res.status(503).json({ error: 'Agora stop credentials are missing.', missing });
 
@@ -371,7 +388,7 @@ app.post('/api/voice/agora/session/:sessionId/stop', async (req, res) => {
       'https://preview.ai.agora.io/conversational-ai/v1/projects/' +
         encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/' +
         encodeURIComponent(sessionId) + '/stop',
-      { method: 'POST', headers: agoraRestHeaders() }
+      { method: 'POST', headers: agoraTokenHeaders(buildConvoAiOnlyToken()) }
     );
     const responseText = await upstream.text();
     let data = {};
