@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AgoraRTC from 'agora-rtc-sdk-ng';
-import { ConversationalAIAPI } from './conversational-ai-api';
-import { EConversationalAIAPIEvents, ETranscriptHelperMode } from './conversational-ai-api/type';
+import { AgoraVoiceAI, AgoraVoiceAIEvents, TranscriptHelperMode } from 'agora-agent-client-toolkit';
 import {
   ArrowDown, ArrowRight, AudioLines, Check, CheckCircle2, ChevronDown,
   Headphones, Heart, Mic, MicOff, Minus, Plus, Search, Send, ShoppingBag,
@@ -268,21 +267,21 @@ export default function App() {
       await client.publish([microphone]);
 
       // RTM carries Agora's live transcript events. Subscribe before the agent joins.
-      const rtmModule = await import('agora-rtm-sdk');
-      const RTM = rtmModule.default?.RTM || rtmModule.RTM || rtmModule.default;
-      if (typeof RTM !== 'function') throw new Error('Could not load Agora Signaling (RTM).');
-      rtmClient = new RTM(prepared.appId, prepared.rtmUserId);
+      const rtmModule = await import('agora-rtm');
+      const RTMClient = rtmModule.default?.RTM || rtmModule.RTM || rtmModule.default;
+      if (typeof RTMClient !== 'function') throw new Error('Could not load Agora Signaling (RTM).');
+      rtmClient = new RTMClient(prepared.appId, prepared.rtmUserId);
       await rtmClient.login({ token: prepared.token });
 
-      convoApi = ConversationalAIAPI.init({
+      convoApi = await AgoraVoiceAI.init({
         rtcEngine: client,
         rtmEngine: rtmClient,
-        renderMode: ETranscriptHelperMode.WORD,
+        renderMode: TranscriptHelperMode.WORD,
         enableLog: false
       });
       await convoApi.subscribeMessage(prepared.channel);
 
-      convoApi.on(EConversationalAIAPIEvents.TRANSCRIPT_UPDATED, (transcripts) => {
+      convoApi.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (transcripts) => {
         const liveMessages = (transcripts || []).map((item) => {
           const metadata = item.metadata || {};
           const objectType = metadata.object || item.object || '';
@@ -312,7 +311,7 @@ export default function App() {
         }
       });
 
-      convoApi.on(EConversationalAIAPIEvents.AGENT_STATE_CHANGED, (_agentUid, event) => {
+      convoApi.on(AgoraVoiceAIEvents.AGENT_STATE_CHANGED, (_agentUid, event) => {
         const states = {
           listening: 'Live · listening',
           thinking: 'Live · thinking',
