@@ -22,7 +22,9 @@ const products = [
   { id: 'p3', name: 'Everyday Mini Tote', category: 'Accessories', price: 1299, oldPrice: 1799, rating: 4.9, reviews: 92, tag: 'New', color: 'sage', emoji: '👜', description: 'A compact, versatile tote for daily essentials.', stock: 24 },
   { id: 'p4', name: 'Glow Desk Lamp', category: 'Home', price: 1899, oldPrice: 2399, rating: 4.6, reviews: 115, tag: 'Staff pick', color: 'butter', emoji: '💡', description: 'Warm dimmable lighting for your desk or bedside.', stock: 9 },
   { id: 'p5', name: 'MoveLite Yoga Mat', category: 'Wellness', price: 999, oldPrice: 1399, rating: 4.7, reviews: 301, tag: 'Great value', color: 'blue', emoji: '🧘', description: 'Grippy, supportive mat for daily movement.', stock: 31 },
-  { id: 'p6', name: 'Hydra Steel Bottle', category: 'Lifestyle', price: 799, oldPrice: 1099, rating: 4.5, reviews: 164, tag: 'Popular', color: 'rose', emoji: '🥤', description: 'Insulated bottle that keeps drinks cool for hours.', stock: 0 }
+  { id: 'p6', name: 'Hydra Steel Bottle', category: 'Lifestyle', price: 799, oldPrice: 1099, rating: 4.5, reviews: 164, tag: 'Popular', color: 'rose', emoji: '🥤', description: 'Insulated bottle that keeps drinks cool for hours.', stock: 0 },
+  { id: 'p7', name: 'PulseBeat Wireless Headphones', category: 'Tech', price: 2799, oldPrice: 3499, rating: 4.7, reviews: 142, tag: 'Value pick', color: 'blue', emoji: '🎧', description: 'Over-ear wireless headphones with cushioned cups and balanced sound.', stock: 16 },
+  { id: 'p8', name: 'SoundNest Bluetooth Earbuds', category: 'Tech', price: 1999, oldPrice: 2599, rating: 4.6, reviews: 98, tag: 'Budget pick', color: 'sage', emoji: '🎵', description: 'Compact Bluetooth earbuds for everyday listening and calls.', stock: 22 }
 ];
 const cart = new Map();
 const orders = new Map();
