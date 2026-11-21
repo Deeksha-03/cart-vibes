@@ -20,5 +20,20 @@ jobs:
         run: npm install
       - name: Check backend JavaScript syntax
         run: node --check server/index.js
+      - name: Smoke-test Agora token builders
+        run: |
+          node - <<'NODE'
+          const { RtcTokenBuilder, RtcRole } = require('agora-token');
+          const { ConvoAITokenBuilder } = require('./server/vendor/agora-token/src/ConvoAITokenBuilder');
+          const appId = '0123456789abcdef0123456789abcdef';
+          const certificate = 'fedcba9876543210fedcba9876543210';
+          const channel = 'cartvibes_ci';
+          const agentToken = ConvoAITokenBuilder.buildToken(appId, certificate, channel, '1002', 3600, 3600);
+          const userToken = RtcTokenBuilder.buildTokenWithRtm2(appId, certificate, channel, 1001, RtcRole.PUBLISHER, 3600, 3600, 3600, 3600, 3600, '1001', 3600);
+          if (!agentToken.startsWith('007') || !userToken.startsWith('007')) {
+            throw new Error('Agora token builder smoke test failed');
+          }
+          console.log('Agora ConvoAI and RTC/RTM tokens generated successfully.');
+          NODE
       - name: Build frontend
         run: npm run build
