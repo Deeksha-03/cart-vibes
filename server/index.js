@@ -73,10 +73,92 @@ app.get('/api/orders/:id', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found.' });
   res.json({ order });
 });
-app.post('/api/assistant', (req, res) => {
+app.post('/api/assistant', async (req, res) => {
   const message = String(req.body?.message || '').trim();
+  if (!message) return res.status(400).json({ error: 'Please say or type what you are looking for.' });
+
+  // When an LLM key is configured, let the model choose from real shopping tools.
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const tools = [
+        { type: 'function', function: { name: 'search_products', description: 'Search the live product catalogue. Use this for product discovery and recommendations.', parameters: { type: 'object', properties: { query: { type: 'string' }, max_price: { type: 'number' } }, required: ['query'], additionalProperties: false } } },
+        { type: 'function', function: { name: 'add_to_cart', description: 'Add a matching in-stock product to the shopping cart when the customer asks to add it.', parameters: { type: 'object', properties: { product_id: { type: 'string' }, quantity: { type: 'integer', minimum: 1 } }, required: ['product_id'], additionalProperties: false } } },
+        { type: 'function', function: { name: 'apply_coupon', description: 'Apply the VIBE10 demo discount when the customer asks for a discount or coupon.', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false } } },
+        { type: 'function', function: { name: 'view_cart', description: 'Open and summarize the current shopping cart.', parameters: { type: 'object', properties: {}, additionalProperties: false } } },
+        { type: 'function', function: { name: 'begin_checkout', description: 'Open the cart for customer review before they confirm sandbox checkout. Never place an order without explicit confirmation.', parameters: { type: 'object', properties: {}, additionalProperties: false } } }
+      ];
+      const first = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + process.env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: 'You are Vibe, CartVibes shopping assistant. Be warm, concise and honest. Use tools for catalogue searches and all cart actions. Never invent prices or stock. Only recommend in-stock products. This is a sandbox shop; never claim real payment or shipping.' },
+            { role: 'user', content: message }
+          ],
+          tools,
+          tool_choice: 'auto'
+        })
+      });
+      const firstData = await first.json();
+      if (!first.ok) throw new Error(firstData.error?.message || 'LLM request failed');
+      const assistantMessage = firstData.choices?.[0]?.message;
+      let matches = [];
+      let action = null;
+      const toolMessages = [];
+      for (const call of assistantMessage?.tool_calls || []) {
+        const args = JSON.parse(call.function.arguments || '{}');
+        let result = {};
+        if (call.function.name === 'search_products') {
+          const terms = String(args.query || '').toLowerCase().split(/\\s+/).filter(Boolean);
+          const maxPrice = Number(args.max_price) || Infinity;
+          matches = products.filter(p => p.stock > 0 && p.price <= maxPrice && terms.some(term => (p.name + ' ' + p.category + ' ' + p.description).toLowerCase().includes(term)));
+          if (!matches.length) matches = products.filter(p => p.stock > 0 && p.price <= maxPrice);
+          result = { products: matches.slice(0, 4) };
+        } else if (call.function.name === 'add_to_cart') {
+          const product = products.find(p => p.id === args.product_id && p.stock > 0);
+          if (product) action = { type: 'add_to_cart', productId: product.id, quantity: Math.max(1, Number(args.quantity) || 1) };
+          result = product ? { selected_product: product.name, action: 'add_to_cart' } : { error: 'Product is unavailable.' };
+        } else if (call.function.name === 'apply_coupon') {
+          action = { type: 'apply_coupon', code: String(args.code || 'VIBE10') };
+          result = { action: 'apply_coupon', code: action.code };
+        } else if (call.function.name === 'view_cart') {
+          action = { type: 'show_cart' };
+          result = { items: cartSnapshot() };
+        } else if (call.function.name === 'begin_checkout') {
+          action = { type: 'checkout' };
+          result = { action: 'open_cart_for_confirmation' };
+        }
+        toolMessages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+      }
+      let reply = assistantMessage?.content || '';
+      if (toolMessages.length) {
+        const followup = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + process.env.OPENAI_API_KEY, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+            messages: [
+              { role: 'system', content: 'You are Vibe, a concise and friendly shopping assistant. Describe only the tool results. Do not claim an order or payment has been completed.' },
+              { role: 'user', content: message },
+              assistantMessage,
+              ...toolMessages
+            ]
+          })
+        });
+        const followData = await followup.json();
+        if (!followup.ok) throw new Error(followData.error?.message || 'LLM follow-up failed');
+        reply = followData.choices?.[0]?.message?.content || reply;
+      }
+      return res.json({ reply: reply || 'I found a few options for you.', products: matches.slice(0, 3), action });
+    } catch (error) {
+      console.error('LLM assistant fallback:', error.message);
+    }
+  }
+
+  // Deterministic fallback keeps the prototype usable before an LLM key is added.
   const lower = message.toLowerCase();
-  const budgetMatch = lower.match(/(?:under|below|less than|within|budget(?: of)?|₹|rs\.?\s*)(?:₹\s*)?([\d,]+)/i);
+  const budgetMatch = lower.match(/(?:under|below|less than|within|budget(?: of)?|₹|rs\\.?\\s*)(?:₹\\s*)?([\\d,]+)/i);
   const budget = budgetMatch ? Number(budgetMatch[1].replace(/,/g, '')) : null;
   let matches = products.filter(p => p.stock > 0);
   if (budget) matches = matches.filter(p => p.price <= budget);
@@ -92,16 +174,16 @@ app.post('/api/assistant', (req, res) => {
   if (matched) matches = matches.filter(p => p.category === matched.category);
   let action = null;
   let reply;
-  if (/\b(add|put|include)\b/.test(lower) && matches.length) {
+  if (/\\b(add|put|include)\\b/.test(lower) && matches.length) {
     action = { type: 'add_to_cart', productId: matches[0].id, quantity: 1 };
     reply = 'On it! I found a match that fits what you asked for.';
-  } else if (/\b(coupon|discount|promo|code)\b/.test(lower)) {
+  } else if (/\\b(coupon|discount|promo|code)\\b/.test(lower)) {
     action = { type: 'apply_coupon', code: 'VIBE10' };
     reply = 'I can apply our demo code VIBE10 for 10% off your bag.';
-  } else if (/\b(cart|bag)\b/.test(lower) && /\b(show|open|check|what|view)\b/.test(lower)) {
+  } else if (/\\b(cart|bag)\\b/.test(lower) && /\\b(show|open|check|what|view)\\b/.test(lower)) {
     action = { type: 'show_cart' };
     reply = 'Of course — let me pull up your bag.';
-  } else if (/\b(checkout|buy|purchase|place order)\b/.test(lower)) {
+  } else if (/\\b(checkout|buy|purchase|place order)\\b/.test(lower)) {
     action = { type: 'checkout' };
     reply = 'Ready when you are! Review your bag and place the demo order when it looks right.';
   } else if (matches.length) {
@@ -117,25 +199,23 @@ app.get('/api/voice/status', (_req, res) => res.json({
   agoraConfigured: Boolean(process.env.AGORA_APP_ID && process.env.AGORA_CUSTOMER_ID && process.env.AGORA_CUSTOMER_SECRET && process.env.AGORA_CHANNEL && process.env.AGORA_AGENT_TOKEN)
 }));
 app.post('/api/voice/agora/start', async (_req, res) => {
-  const { AGORA_APP_ID, AGORA_CUSTOMER_ID, AGORA_CUSTOMER_SECRET, AGORA_CHANNEL, AGORA_AGENT_TOKEN } = process.env;
-  if (!AGORA_APP_ID || !AGORA_CUSTOMER_ID || !AGORA_CUSTOMER_SECRET || !AGORA_CHANNEL || !AGORA_AGENT_TOKEN) {
-    return res.status(503).json({ error: 'Agora is not configured yet. Add the required values to your local .env file first.' });
+  const { AGORA_APP_ID, AGORA_CUSTOMER_ID, AGORA_CUSTOMER_SECRET, AGORA_CHANNEL, AGORA_AGENT_TOKEN, AGORA_PIPELINE_ID } = process.env;
+  if (!AGORA_APP_ID || !AGORA_CUSTOMER_ID || !AGORA_CUSTOMER_SECRET || !AGORA_CHANNEL || !AGORA_AGENT_TOKEN || !AGORA_PIPELINE_ID) {
+    return res.status(503).json({ error: 'Add Agora credentials and a published AGORA_PIPELINE_ID to .env. Configure Murf Falcon TTS in that Agora Studio agent first.' });
   }
   try {
     const credentials = Buffer.from(AGORA_CUSTOMER_ID + ':' + AGORA_CUSTOMER_SECRET).toString('base64');
-    const properties = {
-      channel: AGORA_CHANNEL,
-      token: AGORA_AGENT_TOKEN,
-      agent_rtc_uid: process.env.AGORA_AGENT_UID || '1002',
-      remote_rtc_uids: [process.env.AGORA_REMOTE_UID || '1001'],
-      enable_string_uid: true,
-      ...(process.env.AGORA_PIPELINE_ID ? {} : {
-        asr: { language: 'en-US', vendor: ' agora' },
-        llm: { url: 'https://api.openai.com/v1/chat/completions', api_key: process.env.OPENAI_API_KEY || '', system_messages: [{ role: 'system', content: 'You are Vibe, a helpful shopping assistant for CartVibes. Use product tools and never claim an order is real.' }], greeting: 'Hi! Welcome to CartVibes. What are you shopping for today?', params: { model: process.env.OPENAI_MODEL || 'gpt-4o-mini' } },
-        tts: { vendor: 'murf', credential: { mode: 'byok', fields: { api_key: process.env.MURF_API_KEY || '' } }, url: 'wss://global.api.murf.ai/v1/speech/stream-input', params: { voiceId: 'Matthew', locale: 'en-US', model: 'FALCON', sample_rate: 24000 } }
-      })
+    const payload = {
+      name: 'cartvibes-' + Date.now(),
+      pipeline_id: AGORA_PIPELINE_ID,
+      properties: {
+        channel: AGORA_CHANNEL,
+        token: AGORA_AGENT_TOKEN,
+        agent_rtc_uid: process.env.AGORA_AGENT_UID || '1002',
+        remote_rtc_uids: [process.env.AGORA_REMOTE_UID || '1001'],
+        enable_string_uid: true
+      }
     };
-    const payload = { name: 'cartvibes-' + Date.now(), ...(process.env.AGORA_PIPELINE_ID ? { pipeline_id: process.env.AGORA_PIPELINE_ID } : {}), properties };
     const upstream = await fetch('https://api.agora.io/api/conversational-ai-agent/v2/projects/' + AGORA_APP_ID + '/join', {
       method: 'POST',
       headers: { Authorization: 'Basic ' + credentials, 'Content-Type': 'application/json' },
