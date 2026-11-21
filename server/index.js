@@ -110,7 +110,7 @@ app.post('/api/assistant', async (req, res) => {
         const args = JSON.parse(call.function.arguments || '{}');
         let result = {};
         if (call.function.name === 'search_products') {
-          const terms = String(args.query || '').toLowerCase().split(/\\s+/).filter(Boolean);
+          const terms = String(args.query || '').toLowerCase().split(/\s+/).filter(Boolean);
           const maxPrice = Number(args.max_price) || Infinity;
           matches = products.filter(p => p.stock > 0 && p.price <= maxPrice && terms.some(term => (p.name + ' ' + p.category + ' ' + p.description).toLowerCase().includes(term)));
           if (!matches.length) matches = products.filter(p => p.stock > 0 && p.price <= maxPrice);
@@ -158,7 +158,7 @@ app.post('/api/assistant', async (req, res) => {
 
   // Deterministic fallback keeps the prototype usable before an LLM key is added.
   const lower = message.toLowerCase();
-  const budgetMatch = lower.match(/(?:under|below|less than|within|budget(?: of)?|₹|rs\\.?\\s*)(?:₹\\s*)?([\\d,]+)/i);
+  const budgetMatch = lower.match(/(?:under|below|less than|within|budget(?: of)?|₹|rs\.?\s*)(?:₹\s*)?([\d,]+)/i);
   const budget = budgetMatch ? Number(budgetMatch[1].replace(/,/g, '')) : null;
   let matches = products.filter(p => p.stock > 0);
   if (budget) matches = matches.filter(p => p.price <= budget);
@@ -174,16 +174,16 @@ app.post('/api/assistant', async (req, res) => {
   if (matched) matches = matches.filter(p => p.category === matched.category);
   let action = null;
   let reply;
-  if (/\\b(add|put|include)\\b/.test(lower) && matches.length) {
+  if (/\b(add|put|include)\b/.test(lower) && matches.length) {
     action = { type: 'add_to_cart', productId: matches[0].id, quantity: 1 };
     reply = 'On it! I found a match that fits what you asked for.';
-  } else if (/\\b(coupon|discount|promo|code)\\b/.test(lower)) {
+  } else if (/\b(coupon|discount|promo|code)\b/.test(lower)) {
     action = { type: 'apply_coupon', code: 'VIBE10' };
     reply = 'I can apply our demo code VIBE10 for 10% off your bag.';
-  } else if (/\\b(cart|bag)\\b/.test(lower) && /\\b(show|open|check|what|view)\\b/.test(lower)) {
+  } else if (/\b(cart|bag)\b/.test(lower) && /\b(show|open|check|what|view)\b/.test(lower)) {
     action = { type: 'show_cart' };
     reply = 'Of course — let me pull up your bag.';
-  } else if (/\\b(checkout|buy|purchase|place order)\\b/.test(lower)) {
+  } else if (/\b(checkout|buy|purchase|place order)\b/.test(lower)) {
     action = { type: 'checkout' };
     reply = 'Ready when you are! Review your bag and place the demo order when it looks right.';
   } else if (matches.length) {
