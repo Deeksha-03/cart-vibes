@@ -85,6 +85,30 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!agoraCallActive) return;
+    let disposed = false;
+    const syncCartFromVoice = async () => {
+      try {
+        const response = await fetch('/api/cart');
+        if (!response.ok) return;
+        const data = await response.json();
+        if (disposed) return;
+        setCart(data.cart || []);
+        setCoupon(data.coupon || '');
+        setDiscount(Number(data.discount) || 0);
+      } catch (error) {
+        console.warn('Could not sync voice shopping cart:', error);
+      }
+    };
+    syncCartFromVoice();
+    const intervalId = window.setInterval(syncCartFromVoice, 1200);
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+    };
+  }, [agoraCallActive]);
+
   function say(text) {
     if (!text) return;
     if ('speechSynthesis' in window) {
