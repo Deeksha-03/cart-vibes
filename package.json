@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm:server\" \"npm:client\"",
-    "client": "vite --host 0.0.0.0",
+    "client": "vite --host localhost",
     "server": "node --watch server/index.js",
     "build": "vite build",
+    "test": "node --test",
     "start": "node server/index.js"
   },
   "dependencies": {
