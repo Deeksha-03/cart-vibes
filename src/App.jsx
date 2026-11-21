@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import AgoraRTC from 'agora-rtc-sdk-ng';
 import {
   ArrowDown, ArrowRight, AudioLines, Check, CheckCircle2, ChevronDown,
   Headphones, Heart, Mic, MicOff, Minus, Plus, Search, Send, ShoppingBag,
@@ -36,10 +37,15 @@ export default function App() {
   const [discount, setDiscount] = useState(0);
   const [notice, setNotice] = useState('');
   const [order, setOrder] = useState(null);
-  const [voiceMode, setVoiceMode] = useState('Browser voice');
   const [agoraReady, setAgoraReady] = useState(false);
+  const [agoraCallActive, setAgoraCallActive] = useState(false);
+  const [agoraConnecting, setAgoraConnecting] = useState(false);
+  const [agoraCallStatus, setAgoraCallStatus] = useState('Not connected');
   const chatEnd = useRef(null);
   const recognition = useRef(null);
+  const agoraClientRef = useRef(null);
+  const agoraMicRef = useRef(null);
+  const agoraSessionRef = useRef(null);
 
   const categories = ['All', ...new Set(products.map(p => p.category))];
   const visibleProducts = useMemo(() => products.filter(p => {
@@ -57,7 +63,12 @@ export default function App() {
   useEffect(() => {
     fetch('/api/products').then(r => r.ok ? r.json() : null).then(data => data?.products && setProducts(data.products)).catch(() => {});
     fetch('/api/voice/status').then(r => r.json()).then(data => setAgoraReady(Boolean(data.agoraConfigured))).catch(() => {});
-    return () => { recognition.current?.stop(); window.speechSynthesis?.cancel(); };
+    return () => {
+      recognition.current?.stop();
+      window.speechSynthesis?.cancel();
+      agoraMicRef.current?.close();
+      agoraClientRef.current?.leave().catch(() => {});
+    };
   }, []);
 
   function say(text) {
@@ -169,11 +180,126 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
+  async function startAgora() {
+    if (agoraConnecting || agoraCallActive) return;
+    setAgoraConnecting(true);
+    setAgoraCallStatus('Starting secure voice session…');
+    let session = null;
+    let client = null;
+    let microphone = null;
+
+    try {
+      const response = await fetch('/api/voice/agora/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const missing = Array.isArray(data.missing) ? ' Missing: ' + data.missing.join(', ') + '.' : '';
+        throw new Error((data.error || 'Agora could not start the voice session.') + missing);
+      }
+      session = data;
+
+      client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' });
+      client.on('user-published', async (user, mediaType) => {
+        try {
+          await client.subscribe(user, mediaType);
+          if (mediaType === 'audio' && user.audioTrack) {
+            user.audioTrack.play();
+            setAgoraCallStatus('Connected · Vibe is speaking when you hear audio');
+          }
+        } catch (error) {
+          console.error('Could not subscribe to Vibe audio:', error);
+          setNotice('Connected, but I could not play the assistant audio. Check your browser audio permissions.');
+        }
+      });
+      client.on('user-unpublished', (_user, mediaType) => {
+        if (mediaType === 'audio') setAgoraCallStatus('Connected · waiting for Vibe');
+      });
+      client.on('user-left', () => {
+        setAgoraCallStatus('The voice agent disconnected');
+      });
+
+      await client.join(data.appId, data.channel, data.token, Number(data.uid));
+      microphone = await AgoraRTC.createMicrophoneAudioTrack();
+      await client.publish([microphone]);
+
+      agoraClientRef.current = client;
+      agoraMicRef.current = microphone;
+      agoraSessionRef.current = session;
+      setAgoraCallActive(true);
+      setAgoraCallStatus('Live · speak naturally');
+      setListening(false);
+      setMessages(current => [
+        ...current,
+        { role: 'assistant', text: 'You are connected to Vibe through Agora. Speak naturally; tap the microphone again to end the live conversation.', kind: 'hint' }
+      ]);
+    } catch (error) {
+      microphone?.close();
+      if (client) {
+        try { await client.leave(); } catch {}
+      }
+      if (session?.agentSessionId) {
+        fetch('/api/voice/agora/session/' + session.agentSessionId + '/stop', { method: 'POST' }).catch(() => {});
+      }
+      setAgoraCallStatus('Not connected');
+      setNotice(error.message || 'Could not connect to Agora voice.');
+      setTimeout(() => setNotice(''), 6000);
+    } finally {
+      setAgoraConnecting(false);
+    }
+  }
+
+  async function stopAgora() {
+    if (agoraConnecting) return;
+    setAgoraConnecting(true);
+    const session = agoraSessionRef.current;
+    const microphone = agoraMicRef.current;
+    const client = agoraClientRef.current;
+
+    try {
+      microphone?.stop();
+      microphone?.close();
+      if (client) {
+        try { await client.unpublish(); } catch {}
+        try { await client.leave(); } catch {}
+      }
+      if (session?.agentSessionId) {
+        const response = await fetch('/api/voice/agora/session/' + session.agentSessionId + '/stop', { method: 'POST' });
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || 'The browser disconnected, but Agora could not stop the agent session.');
+        }
+      }
+      setNotice('Live voice conversation ended.');
+      setTimeout(() => setNotice(''), 2500);
+    } catch (error) {
+      setNotice(error.message || 'The call ended locally, but the remote agent may take a moment to stop.');
+      setTimeout(() => setNotice(''), 4500);
+    } finally {
+      agoraMicRef.current = null;
+      agoraClientRef.current = null;
+      agoraSessionRef.current = null;
+      setAgoraCallActive(false);
+      setAgoraCallStatus('Not connected');
+      setAgoraConnecting(false);
+      setSpeaking(false);
+    }
+  }
+
   function startListening() {
+    // Prefer the Agora + Murf real-time voice path whenever credentials are configured.
+    if (agoraReady) {
+      if (agoraCallActive) stopAgora();
+      else startAgora();
+      return;
+    }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setNotice('Voice input is not supported in this browser. Try Chrome on your laptop.');
-      setTimeout(() => setNotice(''), 3500);
+      setNotice('Live Agora voice is not configured yet, and browser voice input is unavailable. Set up the .env credentials or use Chrome.');
+      setTimeout(() => setNotice(''), 4500);
       return;
     }
     if (listening) { recognition.current?.stop(); setListening(false); return; }
@@ -192,19 +318,6 @@ export default function App() {
     recognition.current = instance;
     instance.start();
   }
-
-  async function startAgora() {
-    try {
-      const response = await fetch('/api/voice/agora/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Agora is not configured yet');
-      setNotice('Agora agent start requested. Agent ID: ' + (data.agent_id || 'starting'));
-    } catch (error) {
-      setNotice(error.message);
-    }
-    setTimeout(() => setNotice(''), 4500);
-  }
-
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -256,11 +369,11 @@ export default function App() {
                 <div ref={chatEnd}/>
               </div>
               <div className="chat-compose">
-                <button className={'mic-button ' + (listening ? 'listening' : '')} onClick={startListening} title="Speak to Vibe">{listening ? <MicOff size={19}/> : <Mic size={19}/>}</button>
-                <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && processMessage(input)} placeholder={listening ? 'Listening…' : 'Tell Vibe what you have in mind'} />
+                <button className={'mic-button ' + ((listening || agoraCallActive) ? 'listening' : '')} onClick={startListening} disabled={agoraConnecting} title={agoraCallActive ? 'End live voice conversation' : 'Speak to Vibe'}>{(listening || agoraCallActive) ? <MicOff size={19}/> : <Mic size={19}/>}</button>
+                <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && processMessage(input)} placeholder={agoraCallActive ? 'Live voice is active — speak naturally' : listening ? 'Listening…' : 'Tell Vibe what you have in mind'} />
                 <button className="send-button" onClick={() => processMessage(input)} disabled={!input.trim() || busy}><Send size={17}/></button>
               </div>
-              <div className="voice-foot"><span><span className="sound-bars"><i/><i/><i/><i/></span> {listening ? 'Listening to you…' : speaking ? 'Vibe is speaking…' : 'Voice + chat, your choice'}</span><span>EN · INDIA</span></div>
+              <div className="voice-foot"><span><span className="sound-bars"><i/><i/><i/><i/></span> {agoraConnecting ? 'Connecting to Agora…' : agoraCallActive ? agoraCallStatus : listening ? 'Listening to you…' : speaking ? 'Vibe is speaking…' : 'Voice + chat, your choice'}</span><span>EN · INDIA</span></div>
             </div>
             <div className="assistant-right">
               <div className="right-kicker">A GOOD PLACE TO START</div><h3>What's your<br/>shopping mood?</h3><p>Pick a prompt or ask for anything. Vibe's all ears.</p>
@@ -268,7 +381,7 @@ export default function App() {
                 {['Find comfy sneakers under ₹2,500','I need a cute everyday bag','Show me desk accessories','What can I get for under ₹1,000?'].map((prompt, i) => <button key={prompt} onClick={() => processMessage(prompt)}><span>{['👟','👜','🪴','✨'][i]}</span>{prompt}<ArrowRight size={15}/></button>)}
               </div>
               <div className="assistant-note"><WandSparkles size={17}/><span><b>Not sure yet?</b> That's okay. Tell Vibe a little about your day, your budget, or what you love.</span></div>
-              <div className="voice-integrations"><div className="integration-title">VOICE EXPERIENCE <span className="live-indicator"/> </div><div className="integration-row"><span className="integration-icon"><AudioLines size={15}/></span><span><b>Browser voice</b><small>Ready for a live demo</small></span><span className="integration-status ready">READY</span></div><div className="integration-row"><span className="integration-icon agora"><Headphones size={15}/></span><span><b>Agora Conversational AI</b><small>{agoraReady ? 'Server credentials detected' : 'Connect credentials to activate'}</small></span><button className="connect-link" onClick={startAgora}>Test</button></div><div className="integration-caption">Murf Falcon TTS is configured through the Agora agent settings.</div></div>
+              <div className="voice-integrations"><div className="integration-title">VOICE EXPERIENCE <span className="live-indicator"/> </div><div className="integration-row"><span className="integration-icon"><AudioLines size={15}/></span><span><b>Browser voice</b><small>Ready for a live demo</small></span><span className="integration-status ready">READY</span></div><div className="integration-row"><span className="integration-icon agora"><Headphones size={15}/></span><span><b>Agora + Murf Falcon</b><small>{agoraCallActive ? 'Live voice connected' : agoraReady ? 'Credentials configured · ready' : 'Add Agora, OpenAI and Murf keys to .env'}</small></span><button className="connect-link" disabled={!agoraReady || agoraConnecting} onClick={agoraCallActive ? stopAgora : startAgora}>{agoraConnecting ? 'Starting…' : agoraCallActive ? 'End call' : 'Connect'}</button></div><div className="integration-caption">{agoraCallActive ? 'Your microphone is streaming to Vibe over Agora RTC.' : 'Tap the microphone to start a real-time Agora voice conversation. Browser voice remains available until keys are configured.'}</div></div>
             </div>
           </div>
         </section>
