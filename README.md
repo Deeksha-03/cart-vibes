@@ -5,7 +5,7 @@ A conversational commerce prototype: discover products, compare options, add ite
 ## What's working in this prototype
 
 - Responsive React + Vite shopping experience.
-- Conversational shopping assistant with product search/recommendations and simple intent handling.
+- Conversational shopping assistant with catalogue search, recommendation and action tools. Add an OpenAI API key to enable LLM-based tool selection; deterministic fallback works without one.
 - Browser voice input (Web Speech API) and spoken responses (Speech Synthesis API). Use Chrome and allow microphone access.
 - Express API for catalogue, cart updates, coupon validation, sandbox order creation, and order lookup.
 - Demo coupon: `VIBE10` (10% off).
@@ -41,8 +41,9 @@ The default demo uses browser speech recognition and speech synthesis so the end
 1. Copy `.env.example` to `.env`.
 2. Add Agora App ID, Customer ID, Customer Secret, an RTC channel, and a valid RTC token for the agent UID.
 3. Add your Murf API key to `MURF_API_KEY`.
-4. For the current optional REST start endpoint, configure a published Studio pipeline ID in `AGORA_PIPELINE_ID` if you have one. Otherwise the server sends a starter agent configuration with Murf Falcon TTS and an OpenAI-compatible LLM.
-5. Restart the server. The **Test** action beside Agora calls the server endpoint; credentials remain server-side.
+4. Publish an agent in Agora Conversational AI Studio and configure its ASR, LLM and Murf TTS provider there. For Murf, use the BYOK secret-set flow in Agora and select the Falcon model. Copy the published pipeline ID into `AGORA_PIPELINE_ID`.
+5. Set an RTC channel and a valid token for the agent UID. The token's channel and UID must match the values in `.env`.
+6. Restart the server. The **Test** action beside Agora calls the server-side `/join` endpoint; credentials remain server-side.
 
 The current browser interface does not yet join the Agora RTC channel or stream the agent's audio into the browser. That requires the RTC client/token flow and is a follow-on integration. Do not commit `.env` or expose provider secrets in frontend code.
 
