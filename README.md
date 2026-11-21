@@ -8,7 +8,7 @@ CartVibes is a voice-first conversational shopping prototype. This milestone con
 - Browser voice fallback using Web Speech APIs.
 - **Agora live voice path:** the browser joins an RTC channel, publishes microphone audio, subscribes to the agent's audio, and stops the remote agent session when the call ends.
 - A server-side ephemeral Agora agent configuration is created for each call.
-- The agent uses Agora-managed Deepgram ASR, OpenAI BYOK for LLM reasoning, and Murf BYOK with the Falcon TTS model.
+- The agent uses Agora-managed Deepgram ASR and OpenAI LLM, plus Murf BYOK with the Falcon TTS model. An OpenAI API key is not required for the live Agora voice agent.
 - Existing Express endpoints for catalogue, cart updates, coupon validation, sandbox orders and an optional chat-based LLM shopping assistant.
 
 ## Important prototype boundaries
@@ -33,21 +33,20 @@ CartVibes is a voice-first conversational shopping prototype. This milestone con
 |---|---|---|
 | `AGORA_APP_ID` | Agora Console → Project → Manage credentials | Identifies the Agora project |
 | `AGORA_APP_CERTIFICATE` | Same Agora credentials panel | Used by the server to generate RTC tokens |
-| `AGORA_CUSTOMER_ID` | Agora account → RESTful API credentials | Authenticates server-side Platform API requests |
-| `AGORA_CUSTOMER_SECRET` | Same RESTful API credentials section | Authenticates server-side Platform API requests |
-| `OPENAI_API_KEY` | OpenAI API dashboard | Agent reasoning model |
+| `AGORA_LLM_MODEL` | Choose a model supported by Agora managed mode; default `gpt-4o-mini` | Selects the Agora-managed LLM |
+| `OPENAI_API_KEY` | OpenAI API dashboard (optional) | Used only by the separate website text-chat endpoint, not live Agora voice |
 | `MURF_API_KEY` | Murf API dashboard | Murf Falcon text-to-speech |
 
 `AGORA_AGENT_UID` is a numeric RTC identity reserved for the remote voice agent; the default is `1002`.
 
-The App Certificate, Customer Secret, OpenAI key and Murf key are read only by the Express server. Do not add real credentials to GitHub or frontend code. The `.env` file is excluded by `.gitignore`.
+The App Certificate, Murf key and optional OpenAI key are read only by the Express server. Do not add real credentials to GitHub or frontend code. The `.env` file is excluded by `.gitignore`.
 
 ## Agora voice architecture
 
 When the customer starts a call:
 
 1. Express generates a unique RTC channel and separate publisher tokens for the browser user and remote agent.
-2. Express starts an ephemeral Conversational AI Platform session using server-side REST authentication.
+2. Express starts an ephemeral Conversational AI Platform session using an Agora ConvoAI token generated server-side from your App ID and App Certificate.
 3. The ephemeral agent uses managed Deepgram ASR, OpenAI BYOK for the LLM, and Murf BYOK with model `FALCON` for TTS.
 4. The browser joins the same channel with Agora RTC Web SDK, publishes microphone audio and plays the subscribed agent audio.
 5. The customer can end the call; the browser leaves RTC and Express requests that Agora stop the agent session.
