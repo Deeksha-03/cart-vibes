@@ -26,9 +26,15 @@ const products = [
 ];
 const cart = new Map();
 const orders = new Map();
+const voiceSessions = new Map();
+const checkoutConfirmations = new Map();
+let activeCoupon = '';
+let activeDiscount = 0;
+let latestVoiceOrder = null;
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'CartVibes API' }));
 app.get('/api/products', (_req, res) => res.json({ products }));
+app.get('/api/cart', (_req, res) => res.json(cartSummary()));
 app.post('/api/cart/items', (req, res) => {
   const { productId, quantity = 1 } = req.body || {};
   const product = products.find(p => p.id === productId);
@@ -49,28 +55,24 @@ app.patch('/api/cart/items/:id', (req, res) => {
 });
 app.post('/api/coupons/apply', (req, res) => {
   const code = String(req.body?.code || '').trim().toUpperCase();
-  const subtotal = Math.max(0, Number(req.body?.subtotal) || 0);
+  const subtotal = cartSnapshot().reduce((sum, item) => sum + item.price * item.quantity, 0);
   if (code !== 'VIBE10') return res.status(400).json({ error: 'That code did not work. Try VIBE10.' });
   if (subtotal <= 0) return res.status(400).json({ error: 'Add something to your bag first.' });
-  res.json({ code, discount: Math.round(subtotal * 0.10), message: 'VIBE10 applied — 10% off.' });
+  activeCoupon = code;
+  activeDiscount = Math.round(subtotal * 0.10);
+  res.json({ code, discount: activeDiscount, message: 'VIBE10 applied — 10% off.', ...cartSummary() });
 });
 app.post('/api/checkout', (req, res) => {
   const items = cartSnapshot();
   if (!items.length) return res.status(400).json({ error: 'Your bag is empty.' });
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const discount = req.body?.coupon === 'VIBE10' ? Math.min(subtotal, Math.max(0, Number(req.body?.discount) || Math.round(subtotal * 0.10))) : 0;
-  const order = {
-    id: 'CV-' + crypto.randomBytes(3).toString('hex').toUpperCase(),
-    status: 'CONFIRMED',
-    createdAt: new Date().toISOString(),
-    items,
-    subtotal,
-    discount,
-    total: subtotal - discount,
-    paymentMode: 'SANDBOX'
-  };
+  const discount = activeCoupon === 'VIBE10' ? Math.min(subtotal, activeDiscount || Math.round(subtotal * 0.10)) : 0;
+  const order = createDemoOrder(items, activeCoupon, discount);
   orders.set(order.id, order);
+  latestVoiceOrder = order;
   cart.clear();
+  activeCoupon = '';
+  activeDiscount = 0;
   res.status(201).json({ order });
 });
 app.get('/api/orders/:id', (req, res) => {
@@ -201,9 +203,39 @@ app.post('/api/assistant', async (req, res) => {
   res.json({ reply, products: matches.slice(0, 3), action });
 });
 
+
 function agoraConfigMissing() {
   return ['AGORA_APP_ID', 'AGORA_APP_CERTIFICATE', 'MURF_API_KEY']
     .filter(key => !process.env[key]);
+}
+
+function buildRtcRtmToken(channel, uid) {
+  const expiry = 3600;
+  return RtcTokenBuilder.buildTokenWithRtm2(
+    process.env.AGORA_APP_ID,
+    process.env.AGORA_APP_CERTIFICATE,
+    channel,
+    Number(uid),
+    RtcRole.PUBLISHER,
+    expiry,
+    expiry,
+    expiry,
+    expiry,
+    expiry,
+    String(uid),
+    expiry
+  );
+}
+
+function buildConvoAiToken(channel, uid) {
+  return ConvoAITokenBuilder.buildToken(
+    process.env.AGORA_APP_ID,
+    process.env.AGORA_APP_CERTIFICATE,
+    channel,
+    String(uid),
+    86400,
+    3600
+  );
 }
 
 function agoraTokenHeaders(token) {
@@ -213,138 +245,472 @@ function agoraTokenHeaders(token) {
   };
 }
 
-function buildConvoAiToken(channel, uid) {
-  return ConvoAITokenBuilder.buildToken(
-    process.env.AGORA_APP_ID,
-    process.env.AGORA_APP_CERTIFICATE,
-    channel,
-    String(uid),
-    3600,
-    3600
-  );
+function cartSummary() {
+  const items = cartSnapshot();
+  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const discount = activeCoupon === 'VIBE10'
+    ? Math.min(subtotal, activeDiscount || Math.round(subtotal * 0.10))
+    : 0;
+  return {
+    cart: items,
+    coupon: activeCoupon,
+    discount,
+    subtotal,
+    total: Math.max(0, subtotal - discount),
+    latestOrder: latestVoiceOrder
+  };
 }
 
-function buildConvoAiOnlyToken() {
-  const token = new AccessToken2(
-    process.env.AGORA_APP_ID,
-    process.env.AGORA_APP_CERTIFICATE,
-    null,
-    3600
-  );
-  token.add_service(new ServiceConvoAI());
-  return token.build();
+function createDemoOrder(items, coupon, discount) {
+  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const safeDiscount = Math.max(0, Math.min(subtotal, Number(discount) || 0));
+  return {
+    id: 'CV-' + crypto.randomBytes(3).toString('hex').toUpperCase(),
+    status: 'CONFIRMED',
+    createdAt: new Date().toISOString(),
+    items,
+    subtotal,
+    coupon: coupon || null,
+    discount: safeDiscount,
+    total: subtotal - safeDiscount,
+    paymentMode: 'SANDBOX'
+  };
 }
 
-function buildRtcToken(channel, uid) {
-  return RtcTokenBuilder.buildTokenWithUid(
-    process.env.AGORA_APP_ID,
-    process.env.AGORA_APP_CERTIFICATE,
-    channel,
-    uid,
-    RtcRole.PUBLISHER,
-    3600,
-    3600
-  );
+function getPublicToolBaseUrl() {
+  const value = String(process.env.AGORA_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (!value || !process.env.AGORA_TOOL_SHARED_SECRET) return '';
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' ? value : '';
+  } catch {
+    return '';
+  }
 }
+
+function buildShoppingTool(name, description, parameters, body, baseUrl) {
+  return {
+    type: 'function',
+    function: { name, description, parameters },
+    execution: { mode: 'sync' },
+    server: {
+      method: 'POST',
+      url: baseUrl + '/api/agent-tools/dispatch',
+      headers: {
+        'X-CartVibes-Tool-Key': '{{template_variables.cartvibes_tool_key}}'
+      },
+      body,
+      timeout_ms: 10000
+    }
+  };
+}
+
+function createShoppingTools(baseUrl) {
+  const emptyArgs = { type: 'object', properties: {}, additionalProperties: false };
+  return [
+    buildShoppingTool(
+      'searchProducts',
+      'Search the CartVibes catalogue by product type, feature, use case and budget. Use this before recommending products. Return only products actually found and in stock.',
+      {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'What the customer is looking for, such as headphones, shoes or a desk lamp.' },
+          max_price: { type: 'number', description: 'Optional maximum budget in Indian rupees.' }
+        },
+        required: ['query'],
+        additionalProperties: false
+      },
+      { action: 'searchProducts', query: '{{args.query}}', max_price: '{{args.max_price}}' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'compareProducts',
+      'Compare two to four products returned by searchProducts. Compare actual price, discount, rating, stock and description. Do not invent specifications.',
+      {
+        type: 'object',
+        properties: {
+          product_ids: { type: 'array', minItems: 2, maxItems: 4, items: { type: 'string' } }
+        },
+        required: ['product_ids'],
+        additionalProperties: false
+      },
+      { action: 'compareProducts', product_ids: '{{args.product_ids}}' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'addToCart',
+      'Add a selected product to the cart only after the customer clearly asks to add it. Check live demo inventory. Never add an out-of-stock item.',
+      {
+        type: 'object',
+        properties: {
+          product_id: { type: 'string', description: 'The product ID returned by searchProducts.' },
+          quantity: { type: 'integer', minimum: 1, maximum: 10 }
+        },
+        required: ['product_id'],
+        additionalProperties: false
+      },
+      { action: 'addToCart', product_id: '{{args.product_id}}', quantity: '{{args.quantity}}' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'applyCoupon',
+      'Apply a coupon to the current CartVibes cart. The available demo promotion is VIBE10 for 10 percent off. Do not claim a coupon is applied until this tool confirms it.',
+      {
+        type: 'object',
+        properties: { code: { type: 'string' } },
+        required: ['code'],
+        additionalProperties: false
+      },
+      { action: 'applyCoupon', code: '{{args.code}}' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'getCart',
+      'Retrieve the current cart, coupon, subtotal, discount and final total. Use this when the customer asks what is in their bag or before checkout.',
+      emptyArgs,
+      { action: 'getCart' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'prepareCheckout',
+      'Prepare a sandbox checkout preview. Read out the products, subtotal, coupon, discount and total. This does not place the order. Return the short-lived confirmation code and ask the customer to explicitly confirm.',
+      emptyArgs,
+      { action: 'prepareCheckout' },
+      baseUrl
+    ),
+    buildShoppingTool(
+      'placeDemoOrder',
+      'Place the sandbox order only after the customer explicitly confirms the checkout preview (for example, says yes, confirm or place the order). Use the confirmation code from prepareCheckout. Never infer consent.',
+      {
+        type: 'object',
+        properties: {
+          confirmation_code: { type: 'string' },
+          user_confirmed: { type: 'boolean' }
+        },
+        required: ['confirmation_code', 'user_confirmed'],
+        additionalProperties: false
+      },
+      { action: 'placeDemoOrder', confirmation_code: '{{args.confirmation_code}}', user_confirmed: '{{args.user_confirmed}}' },
+      baseUrl
+    )
+  ];
+}
+
+function isAuthorizedAgentTool(req) {
+  const expected = String(process.env.AGORA_TOOL_SHARED_SECRET || '');
+  const supplied = String(req.get('x-cartvibes-tool-key') || '');
+  if (!expected || !supplied) return false;
+  const expectedBuffer = Buffer.from(expected);
+  const suppliedBuffer = Buffer.from(supplied);
+  return expectedBuffer.length === suppliedBuffer.length &&
+    crypto.timingSafeEqual(expectedBuffer, suppliedBuffer);
+}
+
+function normalizeProductIds(value) {
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed.map(String);
+    } catch {}
+    return value.split(',').map(part => part.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+app.post('/api/agent-tools/dispatch', (req, res) => {
+  if (!isAuthorizedAgentTool(req)) return res.status(401).json({ error: 'Unauthorized shopping tool request.' });
+  const action = String(req.body?.action || '');
+
+  if (action === 'searchProducts') {
+    const query = String(req.body?.query || '').trim().toLowerCase();
+    if (!query) return res.status(400).json({ error: 'A product query is required.' });
+    const rawMax = Number(req.body?.max_price);
+    const maxPrice = Number.isFinite(rawMax) && rawMax > 0 ? rawMax : null;
+    const terms = query.split(/\s+/).filter(Boolean);
+    const matches = products.filter(product =>
+      product.stock > 0 &&
+      (!maxPrice || product.price <= maxPrice) &&
+      terms.some(term => (product.name + ' ' + product.category + ' ' + product.description).toLowerCase().includes(term))
+    ).sort((a, b) => b.rating - a.rating).slice(0, 5);
+    return res.json({
+      count: matches.length,
+      products: matches.map(({ id, name, category, price, oldPrice, rating, reviews, stock, description }) =>
+        ({ id, name, category, price, oldPrice, rating, reviews, stock, description })
+      )
+    });
+  }
+
+  if (action === 'compareProducts') {
+    const ids = normalizeProductIds(req.body?.product_ids).slice(0, 4);
+    if (ids.length < 2) return res.status(400).json({ error: 'Choose at least two catalogue products to compare.' });
+    const found = ids.map(id => products.find(product => product.id === id)).filter(Boolean);
+    if (found.length !== ids.length) return res.status(404).json({ error: 'One or more products were not found in the catalogue.' });
+    return res.json({
+      products: found.map(product => ({
+        id: product.id, name: product.name, price: product.price, oldPrice: product.oldPrice,
+        rating: product.rating, reviews: product.reviews, stock: product.stock,
+        description: product.description
+      })),
+      bestPrice: found.reduce((best, item) => item.price < best.price ? item : best),
+      topRated: found.reduce((best, item) => item.rating > best.rating ? item : best)
+    });
+  }
+
+  if (action === 'addToCart') {
+    const productId = String(req.body?.product_id || '');
+    const product = products.find(item => item.id === productId);
+    if (!product) return res.status(404).json({ error: 'That product was not found.' });
+    const quantity = Math.min(10, Math.max(1, Number(req.body?.quantity) || 1));
+    if (product.stock < 1) return res.status(409).json({ error: product.name + ' is out of stock.' });
+    const current = cart.get(productId) || 0;
+    if (current + quantity > product.stock) return res.status(409).json({ error: 'Only ' + product.stock + ' units are available.' });
+    cart.set(productId, current + quantity);
+    return res.json({ success: true, message: product.name + ' added to the cart.', ...cartSummary() });
+  }
+
+  if (action === 'applyCoupon') {
+    const code = String(req.body?.code || '').trim().toUpperCase();
+    const subtotal = cartSnapshot().reduce((sum, item) => sum + item.price * item.quantity, 0);
+    if (code !== 'VIBE10') return res.status(400).json({ error: 'That coupon is not valid. The available demo coupon is VIBE10.' });
+    if (subtotal <= 0) return res.status(400).json({ error: 'Add an item to your bag before applying a coupon.' });
+    activeCoupon = code;
+    activeDiscount = Math.round(subtotal * 0.10);
+    return res.json({ success: true, message: 'VIBE10 applied: 10% off.', ...cartSummary() });
+  }
+
+  if (action === 'getCart') {
+    return res.json({ ...cartSummary() });
+  }
+
+  if (action === 'prepareCheckout') {
+    const summary = cartSummary();
+    if (!summary.cart.length) return res.status(400).json({ error: 'The cart is empty. Find a product and add it first.' });
+    const confirmationCode = crypto.randomBytes(6).toString('hex').toUpperCase();
+    const cartFingerprint = JSON.stringify(summary.cart.map(item => ({ id: item.id, quantity: item.quantity })));
+    checkoutConfirmations.set(confirmationCode, {
+      cartFingerprint,
+      coupon: summary.coupon,
+      discount: summary.discount,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+    return res.json({
+      prepared: true,
+      confirmation_code: confirmationCode,
+      expires_in_seconds: 300,
+      items: summary.cart,
+      subtotal: summary.subtotal,
+      coupon: summary.coupon,
+      discount: summary.discount,
+      total: summary.total,
+      payment_mode: 'SANDBOX',
+      message: 'Preview only. Do not place the order until the customer explicitly confirms.'
+    });
+  }
+
+  if (action === 'placeDemoOrder') {
+    const code = String(req.body?.confirmation_code || '').trim().toUpperCase();
+    const confirmed = req.body?.user_confirmed === true || String(req.body?.user_confirmed).toLowerCase() === 'true';
+    if (!confirmed) return res.status(403).json({ error: 'Explicit customer confirmation is required before placing the sandbox order.' });
+    const prepared = checkoutConfirmations.get(code);
+    if (!prepared || prepared.expiresAt < Date.now()) {
+      checkoutConfirmations.delete(code);
+      return res.status(400).json({ error: 'Checkout confirmation expired. Prepare the checkout summary again.' });
+    }
+    const currentItems = cartSnapshot();
+    const fingerprint = JSON.stringify(currentItems.map(item => ({ id: item.id, quantity: item.quantity })));
+    if (!currentItems.length || fingerprint !== prepared.cartFingerprint) {
+      checkoutConfirmations.delete(code);
+      return res.status(409).json({ error: 'The cart changed after checkout preview. Prepare a fresh summary.' });
+    }
+    const currentSubtotal = currentItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const discount = prepared.coupon === 'VIBE10' ? Math.min(currentSubtotal, prepared.discount) : 0;
+    const order = createDemoOrder(currentItems, prepared.coupon, discount);
+    orders.set(order.id, order);
+    latestVoiceOrder = order;
+    cart.clear();
+    activeCoupon = '';
+    activeDiscount = 0;
+    checkoutConfirmations.delete(code);
+    return res.json({ success: true, order, message: 'Sandbox order confirmed. No payment was charged and no real shipment was created.' });
+  }
+
+  return res.status(400).json({ error: 'Unknown shopping tool action.' });
+});
 
 app.get('/api/voice/status', (_req, res) => {
   const missing = agoraConfigMissing();
-  res.json({
+  const toolsReady = Boolean(getPublicToolBaseUrl());
+  return res.json({
     agoraConfigured: missing.length === 0,
     missing,
-    voiceProvider: 'Agora Conversational AI Platform + Murf Falcon'
+    shoppingToolsReady: toolsReady,
+    shoppingToolsMissing: toolsReady ? [] : ['AGORA_PUBLIC_BASE_URL (public HTTPS URL)', 'AGORA_TOOL_SHARED_SECRET'],
+    voiceProvider: 'Agora Conversational AI Engine · Deepgram Nova-3 · Agora-managed OpenAI · Murf Falcon 2.1',
+    supportedLanguages: ['en-IN', 'kn-IN']
   });
 });
 
-// Start an ephemeral agent session. Provider keys and Agora credentials stay server-side.
-app.post('/api/voice/agora/session', async (_req, res) => {
+app.post('/api/voice/agora/prepare', (req, res) => {
   const missing = agoraConfigMissing();
-  if (missing.length) {
-    return res.status(503).json({ error: 'Agora voice is not configured yet.', missing });
-  }
+  if (missing.length) return res.status(503).json({ error: 'Agora voice credentials are missing.', missing });
 
-  const channel = 'cv-' + crypto.randomBytes(10).toString('hex');
+  const channel = 'cartvibes_' + crypto.randomBytes(8).toString('hex');
   const userUid = crypto.randomInt(100000, 999999);
+  const sessionId = crypto.randomBytes(16).toString('hex');
   const agentUid = Number(process.env.AGORA_AGENT_UID || 1002);
+
   if (!Number.isInteger(agentUid) || agentUid <= 0 || agentUid === userUid) {
-    return res.status(500).json({ error: 'AGORA_AGENT_UID must be a positive integer different from the browser UID.' });
+    return res.status(500).json({ error: 'AGORA_AGENT_UID must be a positive numeric UID.' });
   }
 
   try {
-    const userToken = buildRtcToken(channel, userUid);
-    const agentToken = buildConvoAiToken(channel, agentUid);
-    const catalogSummary = products.map(product =>
-      `${product.name}: ₹${product.price}, ${product.stock > 0 ? product.stock + ' in stock' : 'out of stock'}`
-    ).join('; ');
+    const token = buildRtcRtmToken(channel, userUid);
+    voiceSessions.set(sessionId, {
+      sessionId,
+      channel,
+      userUid,
+      rtmUserId: String(userUid),
+      agentUid,
+      agentId: null,
+      agentToken: null,
+      createdAt: Date.now()
+    });
+    return res.json({
+      sessionId,
+      appId: process.env.AGORA_APP_ID,
+      channel,
+      token,
+      uid: userUid,
+      rtmUserId: String(userUid),
+      shoppingToolsReady: Boolean(getPublicToolBaseUrl())
+    });
+  } catch (error) {
+    console.error('Agora session token generation failed:', error);
+    return res.status(500).json({ error: 'Could not generate the Agora RTC/RTM token.' });
+  }
+});
 
-    const agent = {
-      instructions: [
-        'You are Vibe, the friendly, voice-first shopping assistant for CartVibes.',
-        'Speak naturally and keep responses concise, like a helpful shopping companion.',
-        'Ask a brief clarifying question when the category, use case, or budget is unclear.',
-        'Never invent products, prices, ratings, discounts, or stock. Use only this sample catalogue: ' + catalogSummary,
-        'Be clear that this is a sample demo catalogue. Do not claim to add items to a cart, apply coupons, place orders, charge a payment method, or track shipping. Shopping tools will be connected in a later milestone.',
-        'When a customer asks for an action that is not available yet, explain that clearly and continue helping with product discovery.'
-      ].join(' '),
-      greeting: {
-        mode: 'text',
-        on: 'each_join',
-        text: "Hey! I'm Vibe from CartVibes. Tell me what you're shopping for, and we'll find something great together."
-      },
-      pipeline: {
-        mode: 'cascaded',
-        asr: {
-          credential: { mode: 'managed' },
-          vendor: 'deepgram',
-          model: process.env.AGORA_ASR_MODEL || 'nova-3',
-          language: process.env.AGORA_ASR_LANGUAGE || 'en-IN'
-        },
-        llm: {
-          credential: { mode: 'managed' },
-          vendor: 'openai',
-          style: 'openai',
-          model: process.env.AGORA_LLM_MODEL || 'gpt-4o-mini'
-        },
-        tts: {
-          credential: { mode: 'byok', fields: { api_key: process.env.MURF_API_KEY } },
-          vendor: 'murf',
-          url: 'wss://global.api.murf.ai/v1/speech/stream-input',
-          params: {
-            voiceId: process.env.MURF_VOICE_ID || 'Matthew',
-            locale: process.env.MURF_LOCALE || 'en-US',
-            rate: 0,
-            pitch: 0,
-            model: 'FALCON',
-            sample_rate: 24000
-          }
-        }
+app.post('/api/voice/agora/start', async (req, res) => {
+  const missing = agoraConfigMissing();
+  if (missing.length) return res.status(503).json({ error: 'Agora voice credentials are missing.', missing });
+
+  const sessionId = String(req.body?.sessionId || '');
+  const session = voiceSessions.get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Voice session expired. Please reconnect.' });
+  if (session.agentId) return res.json({ agentId: session.agentId, status: 'RUNNING' });
+
+  const language = req.body?.language === 'kn-IN' ? 'kn-IN' : 'en-IN';
+  const asrLanguage = language === 'kn-IN' ? 'kn' : 'en-IN';
+  const voiceId = process.env.MURF_VOICE_ID || 'Neeta';
+  const ttsModel = process.env.MURF_MODEL || 'FALCON';
+  const ttsStyle = process.env.MURF_STYLE || 'Conversational';
+  const ttsLocale = language;
+  const toolBaseUrl = getPublicToolBaseUrl();
+  const tools = toolBaseUrl ? createShoppingTools(toolBaseUrl) : [];
+  const agentToken = buildConvoAiToken(session.channel, session.agentUid);
+
+  const catalogSummary = products.map(product =>
+    product.name + ': ₹' + product.price + ', ' +
+    (product.stock > 0 ? product.stock + ' in stock' : 'out of stock')
+  ).join('; ');
+
+  const languagePrompt = language === 'kn-IN'
+    ? 'The selected conversation language is Kannada (India). Understand Kannada and natural Kannada-English code-switching. Speak back in natural Kannada, preferably Kannada script. Product names and model numbers may stay in English when that is clearer.'
+    : 'The selected conversation language is Indian English. Speak in clear, natural Indian English.';
+
+  const shoppingPrompt = tools.length
+    ? 'You have live CartVibes shopping tools. Search before recommending. Compare only product IDs returned by search. Add only after a clear request. Apply coupons only when asked. Before ordering, prepare checkout, read the complete amount and ask for explicit confirmation. Only place the sandbox order after the customer clearly confirms. Never claim an action succeeded unless the tool result confirms it. This is sandbox checkout only, with no payment or shipping.'
+    : 'The shopping tools are not reachable in this environment. You can discuss the sample catalogue but must not claim to change the cart, apply a coupon, or place an order.';
+
+  const systemPrompt = [
+    'You are Vibe, a fun, warm, energetic but not pushy shopping companion for CartVibes.',
+    languagePrompt,
+    'Keep each spoken response natural and concise, usually one or two sentences. Ask one useful question at a time about budget, style or use case.',
+    'Never invent product names, prices, stock, discounts or specifications. Use only the catalogue and tool responses.',
+    'Sample catalogue: ' + catalogSummary,
+    shoppingPrompt,
+    'When a tool returns an error, explain it honestly and offer the next useful step. Never expose tool names, API details or secrets.'
+  ].join(' ');
+
+  const toolsConfig = tools.length ? {
+    template_variables: {
+      cartvibes_tool_key: process.env.AGORA_TOOL_SHARED_SECRET
+    },
+    tools
+  } : {};
+
+  const properties = {
+    channel: session.channel,
+    token: agentToken,
+    agent_rtc_uid: String(session.agentUid),
+    agent_rtm_uid: String(session.agentUid),
+    remote_rtc_uids: [String(session.userUid)],
+    enable_string_uid: false,
+    idle_timeout: 120,
+    advanced_features: {
+      enable_rtm: true,
+      enable_tools: tools.length > 0
+    },
+    parameters: {
+      data_channel: 'rtm',
+      audio_scenario: 'chorus',
+      enable_metrics: true,
+      enable_error_message: true
+    },
+    asr: {
+      credential_mode: 'managed',
+      vendor: 'deepgram',
+      params: {
+        url: 'wss://api.deepgram.com/v1/listen',
+        model: process.env.AGORA_ASR_MODEL || 'nova-3',
+        language: asrLanguage
       }
-    };
+    },
+    llm: {
+      credential_mode: 'managed',
+      vendor: 'openai',
+      style: 'openai',
+      url: 'https://api.openai.com/v1/chat/completions',
+      params: { model: process.env.AGORA_LLM_MODEL || 'gpt-4o-mini' },
+      system_messages: [{ role: 'system', content: systemPrompt }],
+      greeting_message: language === 'kn-IN'
+        ? 'ನಮಸ್ಕಾರ! ನಾನು ಕಾರ್ಟ್‌ವೈಬ್ಸ್‌ನ ವೈಬ್. ನಿಮಗೆ ಏನು ಬೇಕು ಎಂದು ಹೇಳಿ, ಒಟ್ಟಿಗೆ ಹುಡುಕೋಣ!'
+        : "Hey! I'm Vibe from CartVibes. Tell me what you're shopping for, and we'll find something great together.",
+      failure_message: language === 'kn-IN'
+        ? 'ಕ್ಷಮಿಸಿ, ಈಗ ಸ್ವಲ್ಪ ತೊಂದರೆ ಆಗುತ್ತಿದೆ. ಮತ್ತೆ ಪ್ರಯತ್ನಿಸೋಣವೇ?'
+        : "Sorry, I hit a small snag. Could we try that once more?",
+      max_history: 40,
+      ...toolsConfig
+    },
+    tts: {
+      vendor: 'murf',
+      params: {
+        api_key: process.env.MURF_API_KEY,
+        base_url: process.env.MURF_BASE_URL || 'wss://global.api.murf.ai/v1/speech/stream-input',
+        voiceId,
+        locale: ttsLocale,
+        rate: Number(process.env.MURF_RATE || 0),
+        pitch: Number(process.env.MURF_PITCH || 0),
+        model: ttsModel,
+        style: ttsStyle,
+        sample_rate: Number(process.env.MURF_SAMPLE_RATE || 24000)
+      }
+    }
+  };
 
-    const payload = {
-      agent,
-      transport: {
-        type: 'rtc',
-        channel,
-        token: agentToken,
-        uid: String(agentUid),
-        subscribe_uids: [String(userUid)],
-        audio_scenario: 'aiserver'
-      },
-      lifecycle: {
-        idle_timeout_ms: 30000,
-        max_duration_ms: 3600000,
-        graceful_stop: { enabled: true, timeout_ms: 10000 }
-      },
-      data_policy: { retention: 'none' }
-    };
+  const payload = {
+    name: 'cartvibes-' + session.sessionId,
+    properties
+  };
 
+  try {
     const upstream = await fetch(
-      'https://preview.ai.agora.io/conversational-ai/v1/projects/' +
-        encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/ephemeral',
+      'https://api.agora.io/api/conversational-ai-agent/v2/projects/' +
+        encodeURIComponent(process.env.AGORA_APP_ID) + '/join',
       {
         method: 'POST',
-        headers: { ...agoraTokenHeaders(agentToken), 'Idempotency-Key': crypto.randomUUID() },
+        headers: agoraTokenHeaders(agentToken),
         body: JSON.stringify(payload)
       }
     );
@@ -354,53 +720,55 @@ app.post('/api/voice/agora/session', async (_req, res) => {
     catch { data = { detail: responseText }; }
 
     if (!upstream.ok) {
-      console.error('Agora session start failed:', upstream.status, data);
+      console.error('Agora agent start failed:', upstream.status, data);
       return res.status(upstream.status).json({
-        error: data.detail || data.message || data.reason || 'Agora could not start the voice session.',
-        reason: data.reason
+        error: data.detail || data.message || data.reason || 'Agora failed to start the conversational agent.',
+        detail: data
       });
     }
 
-    return res.json({
-      appId: process.env.AGORA_APP_ID,
-      channel,
-      token: userToken,
-      uid: userUid,
-      agentSessionId: data.agent_session_id,
-      status: data.status
-    });
+    const agentId = data.agent_id || data.agentId || data.id;
+    if (!agentId) {
+      console.error('Agora join response did not include agent_id:', data);
+      return res.status(502).json({ error: 'Agora started without returning an agent ID.', detail: data });
+    }
+    session.agentId = agentId;
+    session.agentToken = agentToken;
+    session.language = language;
+    return res.json({ agentId, status: data.status || 'RUNNING', language, shoppingToolsReady: tools.length > 0 });
   } catch (error) {
-    console.error('Agora session setup failed:', error);
-    return res.status(502).json({ error: 'Could not start the Agora voice session: ' + error.message });
+    console.error('Agora agent start request failed:', error);
+    return res.status(502).json({ error: 'Could not start the Agora agent: ' + error.message });
   }
 });
 
-app.post('/api/voice/agora/session/:sessionId/stop', async (req, res) => {
-  const missing = ['AGORA_APP_ID', 'AGORA_APP_CERTIFICATE']
-    .filter(key => !process.env[key]);
-  if (missing.length) return res.status(503).json({ error: 'Agora stop credentials are missing.', missing });
-
-  const sessionId = String(req.params.sessionId || '');
-  if (!/^[a-z0-9]{32}$/.test(sessionId)) return res.status(400).json({ error: 'Invalid Agora session ID.' });
+app.post('/api/voice/agora/stop', async (req, res) => {
+  const sessionId = String(req.body?.sessionId || '');
+  const session = voiceSessions.get(sessionId);
+  if (!session) return res.json({ stopped: true });
 
   try {
-    const upstream = await fetch(
-      'https://preview.ai.agora.io/conversational-ai/v1/projects/' +
-        encodeURIComponent(process.env.AGORA_APP_ID) + '/sessions/' +
-        encodeURIComponent(sessionId) + '/stop',
-      { method: 'POST', headers: agoraTokenHeaders(buildConvoAiOnlyToken()) }
-    );
-    const responseText = await upstream.text();
-    let data = {};
-    try { data = responseText ? JSON.parse(responseText) : {}; } catch { data = {}; }
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({
-        error: data.detail || data.message || data.reason || 'Agora could not stop the session.'
-      });
+    if (session.agentId && session.agentToken) {
+      const upstream = await fetch(
+        'https://api.agora.io/api/conversational-ai-agent/v2/projects/' +
+          encodeURIComponent(process.env.AGORA_APP_ID) + '/agents/' +
+          encodeURIComponent(session.agentId) + '/leave',
+        {
+          method: 'POST',
+          headers: agoraTokenHeaders(session.agentToken),
+          body: JSON.stringify({})
+        }
+      );
+      const responseText = await upstream.text();
+      if (!upstream.ok) {
+        console.error('Agora agent leave failed:', upstream.status, responseText);
+        return res.status(upstream.status).json({ error: 'Agora could not stop the voice agent.', detail: responseText });
+      }
     }
-    return res.json({ stopped: true, agentSessionId: sessionId });
+    voiceSessions.delete(sessionId);
+    return res.json({ stopped: true });
   } catch (error) {
-    return res.status(502).json({ error: 'Could not stop the Agora voice session: ' + error.message });
+    return res.status(502).json({ error: 'Could not stop the Agora voice agent: ' + error.message });
   }
 });
 
